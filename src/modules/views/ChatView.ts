@@ -41,7 +41,8 @@ export class ChatView extends BaseView {
         minWidth: "0",
         minHeight: "0",
         overflow: "hidden",
-        backgroundColor: "var(--ai-surface)",
+        backgroundColor: "#0e0e0e",
+        color: "#f5f5f5",
       },
     });
     const bar = this.createElement("div", {
@@ -51,7 +52,9 @@ export class ChatView extends BaseView {
         gap: "8px",
         flex: "0 0 auto",
         padding: "10px 12px",
-        borderBottom: "1px solid var(--ai-border)",
+        color: "#f5f5f5",
+        backgroundColor: "#141414",
+        borderBottom: "1px solid rgba(255, 255, 255, 0.12)",
       },
     });
     bar.appendChild(
@@ -64,10 +67,10 @@ export class ChatView extends BaseView {
       textContent: getString("chat-view-use-selection"),
       styles: {
         marginLeft: "auto",
-        border: "1px solid var(--ai-border)",
+        border: "1px solid rgba(255, 255, 255, 0.28)",
         borderRadius: "6px",
-        background: "transparent",
-        color: "inherit",
+        background: "#111",
+        color: "#f5f5f5",
         padding: "4px 8px",
         cursor: "pointer",
         font: "inherit",
@@ -88,7 +91,9 @@ export class ChatView extends BaseView {
         minWidth: "0",
         display: "flex",
         flexDirection: "column",
-        padding: "12px",
+        padding: "0",
+        backgroundColor: "#0e0e0e",
+        color: "#f5f5f5",
         boxSizing: "border-box",
       },
     });
@@ -139,7 +144,7 @@ export class ChatView extends BaseView {
       textContent: getString("chat-view-empty"),
       styles: {
         margin: "auto",
-        color: "var(--ai-text-muted, #777)",
+        color: "#f5f5f5",
         fontSize: "13px",
         textAlign: "center",
       },

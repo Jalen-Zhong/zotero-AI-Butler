@@ -1,44 +1,35 @@
-# 5.0.0-beta.2-jalen.1
+# 5.0.0-beta.2-jalen.2
 
-Fork-only build. Agent stays. Chat is the direct paper Q&A window.
+Fork-only build. Agent stays. Chat is the paper Q&A window, in the sidebar and in the main window.
 
-## Root cause
+## Root cause of the remaining raw LaTeX
 
-- 「打开对话」 / `chatWithAI` called `SummaryView.loadItemForChat`. That follow-up is in-memory only and has no ChatPersist new / list / delete.
-- Summary follow-up already turns `$...$` into KaTeX HTML. Without `katex.min.css` in that dialog, the HTML's text reads as one flat line (`tγ = Ω (...)`), which is the screenshot. Streaming summary HTML also skipped KaTeX and used `marked` only.
+jalen.1 loaded KaTeX CSS and rendered delimited math (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`). The installed Chat screenshot still shows source such as `d = \sqrt{D_{KL}(\pi || \pi_{init})}` and `R_{BoN}(d) = d(\alpha_{BoN} - \beta_{BoN} d)`.
+
+That is undelimited TeX. `extractDisplayFormulas` only pulls math that already has delimiters, so KaTeX never ran. Missing CSS looks different: glyph text such as `tγ = Ω (...)` with no `\sqrt`. The quick-chat sanitizers are not the cause. `sanitizeQuickChatDomString` only drops unsafe control characters, and `normalizeQuickChatXhtml` only rewrites `&nbsp;` and void tags. Neither removes `.katex` or `.katex-display`.
 
 ## What changed
 
-- Main window **Chat** tab hosts the same full-height `renderChatArea(..., { mode: "page" })` used by the sidebar, including thread list, + Chat, and Delete (`ChatPersist`, per item).
-- 「打开对话」, the reader button, and the `chatWithAI` menu open that tab for the current item. The tab can also bind the paper selected in Zotero.
-- The dialog links `katex.min.css` the same way as the other stylesheets, and Summary follow-up / summary card / streaming output inject that CSS again when the HTML is written. Summary markdown now goes through `markdownToDisplayHtml`. Chat uses the same stylesheet.
-- Agent replies render the same math delimiters through the safe DOM path; model HTML is still not an HTML sink.
+- Before display HTML is built, undelimited TeX is wrapped. A whole equation line becomes `$$...$$`. A formula inside a sentence becomes `$...$`. Double-escaped `\\sqrt` is normalized to `\sqrt` first. Fenced code and already-delimited math are left alone. The same pass feeds Chat, Summary follow-up, and Agent.
+- Chat surfaces (sidebar Chat tab and main Chat tab) use a black background and white text, including `.katex { color: #fff }`.
+- The sidebar Chat tab is the full-height page chat (thread list, new, delete). It does not use the 200px `sidebarQuickChatHeight` pref. The old “open chat” card is no longer stacked above it. A ↗ control still opens the main Chat tab.
 
 ## Files
 
-- `src/modules/views/ChatView.ts` (new)
-- `src/modules/katexStyle.ts` (new)
-- `src/modules/views/MainWindow.ts`
-- `src/hooks.ts`
-- `src/modules/ItemPaneSection.ts`
-- `src/modules/views/SummaryView.ts`
 - `src/modules/noteMarkdown.ts`
-- `src/modules/views/agent/AgentMarkdown.ts`
-- `src/modules/views/agent/AgentView.ts`
-- `addon/content/agent.css`
-- `addon/content/outputWindow.css`
-- `addon/locale/en-US/mainWindow.ftl`
-- `addon/locale/zh-CN/mainWindow.ftl`
-- `package.json` version `5.0.0-beta.2-jalen.1`
+- `src/modules/quickChatDom.ts` (new)
+- `src/modules/ItemPaneSection.ts`
+- `src/modules/views/ChatView.ts`
+- `test/noteMarkdown.test.ts`
+- `package.json` version `5.0.0-beta.2-jalen.2`
 
 ## Verify in Zotero
 
-1. Install the XPI, restart Zotero, select a paper.
-2. Item pane → 对话, or 打开对话 / AI Chat. The main window Chat tab should open on that paper.
-3. Ask a question. Use the thread list, **+ Chat**, and **Delete**. Close and reopen the same paper; the thread should still be there.
-4. Ask for `$E=mc^2$`, `$$a_b=c^2$$`, `\(...\)`, and `\[...\]` in Chat and in AI Summary follow-up. Formulas should look like typeset math, not raw KaTeX spans.
-5. Agent tab still opens and can show the same delimiters.
+1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.2.xpi`, restart Zotero, select a paper.
+2. Sidebar Chat should fill the item pane under the tabs, black background, white text, with the thread list, + Chat, and Delete. ↗ opens the main Chat tab for the same paper.
+3. Ask for the undelimited lines `d = \sqrt{D_{KL}(\pi || \pi_{init})}` and `R_{BoN}(d) = d(\alpha_{BoN} - \beta_{BoN} d)`, and for `$E=mc^2$`. They should typeset, including the white KaTeX glyphs. The same thread should appear in the main Chat tab.
+4. Agent still opens. Summary follow-up still typesets delimited and undelimited formulas.
 
 ## Prefs already on this Mac
 
-Fork defaults hide note, table, and image summary and start the sidebar on Chat. An existing profile can still have `sidebarModuleVisibility` with note/table true and `sidebarQuickChatHeight` 200. Those prefs are not rewritten by this build. The Chat tab does not use the 200px height.
+Fork defaults hide note, table, and image summary and start the sidebar on Chat. This build does not rewrite `sidebarModuleVisibility` or `sidebarQuickChatHeight`. Page-mode Chat ignores that height.

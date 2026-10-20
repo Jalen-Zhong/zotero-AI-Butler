@@ -33,6 +33,10 @@ import {
 } from "./chatContext";
 import { chatPersist } from "./chatPersist";
 import {
+  normalizeQuickChatXhtml,
+  sanitizeQuickChatDomString,
+} from "./quickChatDom";
+import {
   buildQuickChatQuestionWithRelatedContext,
   createQuickChatRelatedContextSignature,
   getQuickChatRelatedLimit,
@@ -1555,6 +1559,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     }
 
     .ai-butler-sidebar-content {
+      display: flex;
+      flex-direction: column;
       flex: 1 1 auto;
       min-height: 0;
       width: 100%;
@@ -1571,6 +1577,7 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       min-width: 0;
       min-height: 0;
       height: 100%;
+      flex: 1 1 auto;
       flex-direction: column;
       overflow: hidden;
       overscroll-behavior: contain;
@@ -1589,6 +1596,25 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     .ai-butler-sidebar-tab-panel[data-tab-id="mindmap"] {
       overflow: hidden;
       overscroll-behavior: contain;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="chat"] {
+      flex: 1 1 auto;
+      height: 100%;
+      min-height: 0;
+      padding: 0;
+      background: #0e0e0e;
+      color: #f5f5f5;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="chat"] > #ai-butler-inline-chat {
+      flex: 1 1 auto;
+      height: 100%;
+      min-height: 0;
+      max-height: none;
+      border: none;
+      border-radius: 0;
+      margin: 0;
     }
 
     .ai-butler-sidebar-tab-panel[data-tab-id="quickRead"] {
@@ -1769,11 +1795,15 @@ function renderSidebarTabPanel(
       renderNoteSection(panel, doc, item, "summary", { mode: "page" });
       break;
     case "chat":
-      if (isSidebarModuleEnabled("actionButtons")) {
-        renderFullChatEntry(panel, doc, item, handleOpenAIChat);
-      }
       if (isSidebarModuleEnabled("quickChat")) {
-        renderChatArea(panel, doc, item, true, { mode: "page" });
+        renderChatArea(panel, doc, item, true, {
+          mode: "page",
+          onOpenWindow: () => {
+            void handleOpenAIChat(item.id);
+          },
+        });
+      } else if (isSidebarModuleEnabled("actionButtons")) {
+        renderFullChatEntry(panel, doc, item, handleOpenAIChat);
       }
       break;
     case "deepRead":
@@ -3813,6 +3843,24 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   overflow-wrap: normal !important;
   word-break: normal !important;
   white-space: nowrap !important;
+  color: #fff !important;
+}
+#ai-butler-inline-chat {
+  background: #0e0e0e;
+  color: #f5f5f5;
+}
+#ai-butler-inline-chat .ai-butler-quick-chat-messages,
+#ai-butler-inline-chat .ai-butler-quick-chat-user,
+#ai-butler-inline-chat .ai-butler-quick-chat-assistant,
+#ai-butler-inline-chat textarea,
+#ai-butler-inline-chat select {
+  color: #f5f5f5;
+}
+#ai-butler-inline-chat .katex,
+#ai-butler-inline-chat .katex-display,
+#ai-butler-inline-chat .katex-html,
+#ai-butler-inline-chat .katex * {
+  color: #fff !important;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant p {
   margin: 0.35em 0;
@@ -3974,7 +4022,7 @@ function renderChatArea(
   doc: Document,
   item: Zotero.Item,
   initiallyVisible = false,
-  options: { mode?: "card" | "page" } = {},
+  options: { mode?: "card" | "page"; onOpenWindow?: () => void } = {},
 ): void {
   const isPageMode = options.mode === "page";
   const existingChat = body.querySelector("#ai-butler-inline-chat");
@@ -4019,12 +4067,13 @@ function renderChatArea(
     max-inline-size: 100%;
     min-width: 0;
     min-inline-size: 0;
-    ${isPageMode ? "min-height: 0; flex: 1 1 auto;" : ""}
+    ${isPageMode ? "height: 100%; min-height: 0; flex: 1 1 auto;" : ""}
     contain: inline-size;
-    border: 1px solid rgba(89, 192, 188, 0.22);
-    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: ${isPageMode ? "0" : "10px"};
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.72);
+    background: #0e0e0e;
+    color: #f5f5f5;
     margin-bottom: ${isPageMode ? "0" : "12px"};
   `;
 
@@ -4033,9 +4082,11 @@ function renderChatArea(
     display: flex;
     align-items: center;
     gap: 6px;
+    flex: 0 0 auto;
     padding: 8px 10px;
-    background: rgba(89, 192, 188, 0.1);
-    border-bottom: 1px solid rgba(89, 192, 188, 0.2);
+    background: #141414;
+    color: #f5f5f5;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
     font-size: 12px;
     font-weight: 500;
   `;
@@ -4124,14 +4175,14 @@ function renderChatArea(
   threadSelect.id = "ai-butler-chat-thread-select";
   threadSelect.title = getString("itempane-quick-chat-thread-switch");
   threadSelect.style.cssText = `
-    max-width: 120px;
-    height: 20px;
-    font-size: 10px;
-    border: 1px solid currentColor;
+    max-width: ${isPageMode ? "180px" : "120px"};
+    height: ${isPageMode ? "26px" : "20px"};
+    font-size: ${isPageMode ? "12px" : "10px"};
+    border: 1px solid rgba(255, 255, 255, 0.28);
     border-radius: 3px;
-    background: transparent;
-    color: inherit;
-    opacity: 0.85;
+    background: #111;
+    color: #f5f5f5;
+    opacity: 1;
   `;
   const newThreadBtn = createQuickControlButton(
     getString("itempane-quick-chat-thread-new"),
@@ -4160,6 +4211,16 @@ function renderChatArea(
     "A+",
     getString("itempane-quick-chat-increase-font"),
   );
+  if (options.onOpenWindow) {
+    const openWindowBtn = createQuickControlButton(
+      "↗",
+      getString("itempane-ai-open-chat"),
+    );
+    openWindowBtn.addEventListener("click", () => {
+      options.onOpenWindow?.();
+    });
+    chatControls.appendChild(openWindowBtn);
+  }
   chatControls.appendChild(threadSelect);
   chatControls.appendChild(newThreadBtn);
   chatControls.appendChild(deleteThreadBtn);
@@ -4172,9 +4233,12 @@ function renderChatArea(
   // 消息显示区
   const messagesArea = doc.createElement("div");
   messagesArea.className = "ai-butler-quick-chat-messages";
+  // Page mode fills the sidebar and main Chat panes. The 200px height pref is card-only.
   messagesArea.style.cssText = `
     height: ${isPageMode ? "auto" : `${currentQuickChatHeight}px`};
     ${isPageMode ? "flex: 1 1 auto;" : ""}
+    color: #f5f5f5;
+    background: #0e0e0e;
     width: 100%;
     inline-size: 100%;
     max-width: 100%;
@@ -4213,7 +4277,7 @@ function renderChatArea(
     messagesArea.innerHTML = "";
     const list = Array.isArray(messages) ? messages : [];
     if (list.length === 0) {
-      messagesArea.innerHTML = `<div style="color: #777; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-thread-empty"))}</div>`;
+      messagesArea.innerHTML = `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-thread-empty"))}</div>`;
       return;
     }
     let index = 0;
@@ -4240,9 +4304,10 @@ function renderChatArea(
         min-width: 0;
         margin-bottom: 12px;
         padding: 8px;
-        border: 1px solid rgba(128, 128, 128, 0.2);
+        border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 8px;
         background: transparent;
+        color: #f5f5f5;
         user-select: text;
         cursor: text;
       `;
@@ -4251,7 +4316,8 @@ function renderChatArea(
       userMsgDiv.style.cssText = `
         margin-bottom: 8px;
         padding: 8px;
-        background: rgba(89, 192, 188, 0.1);
+        background: rgba(89, 192, 188, 0.22);
+        color: #f5f5f5;
         border-radius: 6px;
         border-left: 3px solid #59c0bc;
         user-select: text;
@@ -4266,9 +4332,10 @@ function renderChatArea(
         aiMsgDiv.style.cssText = `
           margin-bottom: 8px;
           padding: 8px;
-          background: rgba(128, 128, 128, 0.05);
+          background: #161616;
+          color: #f5f5f5;
           border-radius: 6px;
-          border-left: 3px solid #667eea;
+          border-left: 3px solid #8ab4ff;
           width: 100%;
           max-width: 100%;
           min-width: 0;
@@ -4483,7 +4550,7 @@ function renderChatArea(
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 11px;
-    color: rgba(128, 128, 128, 0.9);
+    color: #f5f5f5;
   `;
 
   const createRelatedButton = (text: string, title?: string) => {
@@ -4549,10 +4616,7 @@ function renderChatArea(
 
   let quickChatPinnedToBottom = true;
 
-  const setRelatedStatus = (
-    message: string,
-    color = "rgba(128, 128, 128, 0.9)",
-  ): void => {
+  const setRelatedStatus = (message: string, color = "#f5f5f5"): void => {
     relatedStatus.textContent = message;
     relatedStatus.style.color = color;
   };
@@ -4665,7 +4729,7 @@ function renderChatArea(
       );
     }
     refreshThreadSelect();
-    messagesArea.innerHTML = `<div style="color: #777; text-align: center; padding: 10px;">${escapeHtmlForChat(message)}</div>`;
+    messagesArea.innerHTML = `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${escapeHtmlForChat(message)}</div>`;
     quickChatPinnedToBottom = true;
     syncQuickChatThreadControls();
   }
@@ -4789,9 +4853,11 @@ function renderChatArea(
 
   const inputArea = doc.createElement("div");
   inputArea.style.cssText = `
+    flex: 0 0 auto;
     padding: 8px;
-    border-top: 1px solid rgba(128, 128, 128, 0.2);
-    background: rgba(128, 128, 128, 0.025);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    background: #0e0e0e;
+    color: #f5f5f5;
   `;
 
   const composer = doc.createElement("div");
@@ -4803,10 +4869,11 @@ function renderChatArea(
     gap: 5px;
     box-sizing: border-box;
     padding: 7px;
-    border: 1px solid rgba(128, 128, 128, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 15px;
-    background: rgba(128, 128, 128, 0.045);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    background: #0a0a0a;
+    color: #f5f5f5;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   `;
 
   const inputBox = doc.createElement("textarea");
@@ -4823,7 +4890,7 @@ function renderChatArea(
     font-size: 12px;
     line-height: 1.45;
     font-family: inherit;
-    color: inherit;
+    color: #f5f5f5;
     background: transparent;
   `;
 
@@ -4908,8 +4975,8 @@ function renderChatArea(
     composer.style.boxShadow = "0 0 0 2px rgba(89, 192, 188, 0.12)";
   });
   inputBox.addEventListener("blur", () => {
-    composer.style.borderColor = "rgba(128, 128, 128, 0.28)";
-    composer.style.boxShadow = "inset 0 1px 0 rgba(255, 255, 255, 0.06)";
+    composer.style.borderColor = "rgba(255, 255, 255, 0.2)";
+    composer.style.boxShadow = "inset 0 1px 0 rgba(255, 255, 255, 0.04)";
   });
 
   const startNewQuickChatConversation = async (): Promise<void> => {
@@ -4943,7 +5010,7 @@ function renderChatArea(
       refreshThreadSelect();
     }
 
-    messagesArea.innerHTML = `<div style="color: #777; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-new-conversation-created"))}</div>`;
+    messagesArea.innerHTML = `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-new-conversation-created"))}</div>`;
     inputBox.value = "";
     resizeQuickChatInput();
     sendBtn.textContent = "↑";
@@ -5042,7 +5109,7 @@ function renderChatArea(
         const pdfMode = LLMService.getEffectivePdfProcessMode();
 
         showPdfStatus(
-          `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-chat-loading-pdf")}</div>`,
+          `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${getString("itempane-chat-loading-pdf")}</div>`,
         );
 
         const { content: pdfContent, isBase64 } =
@@ -5161,9 +5228,10 @@ function renderChatArea(
       contain: inline-size;
       margin-bottom: 12px;
       padding: 8px;
-      border: 1px solid rgba(128, 128, 128, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 8px;
       background: transparent;
+      color: #f5f5f5;
       user-select: text;
       cursor: text;
     `;
@@ -5182,7 +5250,8 @@ function renderChatArea(
       contain: inline-size;
       margin-bottom: 8px;
       padding: 8px;
-      background: rgba(89, 192, 188, 0.1);
+      background: rgba(89, 192, 188, 0.22);
+      color: #f5f5f5;
       border-radius: 6px;
       border-left: 3px solid #59c0bc;
       user-select: text;
@@ -5200,9 +5269,10 @@ function renderChatArea(
     aiMsgDiv.style.cssText = `
       margin-bottom: 8px;
       padding: 8px;
-      background: rgba(128, 128, 128, 0.05);
+      background: #161616;
+      color: #f5f5f5;
       border-radius: 6px;
-      border-left: 3px solid #667eea;
+      border-left: 3px solid #8ab4ff;
       width: 100%;
       inline-size: 100%;
       max-width: 100%;
@@ -5217,7 +5287,7 @@ function renderChatArea(
       user-select: text;
       cursor: text;
     `;
-    aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <em style="color: #999;">${getString("itempane-thinking")}</em>`;
+    aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <em style="color: #f5f5f5;">${getString("itempane-thinking")}</em>`;
     pairWrapper.appendChild(aiMsgDiv);
 
     // 创建保存按钮区域（初始隐藏）
@@ -5433,10 +5503,10 @@ function renderChatArea(
           updateQuickChatAssistantMessage(
             aiMsgDiv,
             fullResponse,
-            `<div style="color: #777; font-size: 11px; margin-top: 6px;">${getString("itempane-stopped-note")}</div>`,
+            `<div style="color: #f5f5f5; font-size: 11px; margin-top: 6px;">${getString("itempane-stopped-note")}</div>`,
           );
         } else {
-          aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <span style="color: #777;">${getString("itempane-stopped-empty")}</span>`;
+          aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <span style="color: #f5f5f5;">${getString("itempane-stopped-empty")}</span>`;
         }
         return;
       }
@@ -5621,55 +5691,6 @@ function escapeHtmlForChat(text: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;")
     .replace(/\n/g, "<br/>");
-}
-
-function sanitizeQuickChatDomString(text: string): string {
-  let result = "";
-  const input = String(text ?? "");
-  for (let index = 0; index < input.length; index++) {
-    const code = input.charCodeAt(index);
-    const isUnsafeControl =
-      code <= 8 ||
-      (code >= 11 && code <= 12) ||
-      (code >= 14 && code <= 31) ||
-      (code >= 127 && code <= 159);
-    if (isUnsafeControl) continue;
-
-    const isUnicodeNonCharacter =
-      (code >= 0xfdd0 && code <= 0xfdef) || code === 0xfffe || code === 0xffff;
-    if (isUnicodeNonCharacter) continue;
-
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = input.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        result += input[index] + input[index + 1];
-        index += 1;
-      } else {
-        result += "\uFFFD";
-      }
-      continue;
-    }
-
-    if (code >= 0xdc00 && code <= 0xdfff) {
-      result += "\uFFFD";
-      continue;
-    }
-
-    result += input[index];
-  }
-  return result;
-}
-
-function normalizeQuickChatXhtml(html: string): string {
-  return html
-    .replace(/&nbsp;/gi, "&#160;")
-    .replace(
-      /<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)\b([^>]*)>/gi,
-      (match, tagName: string, attributes: string) => {
-        if (match.endsWith("/>")) return match;
-        return `<${tagName}${attributes.replace(/\s*\/?\s*$/, "")}/>`;
-      },
-    );
 }
 
 function normalizeQuickChatMarkdownStructure(markdown: string): string {

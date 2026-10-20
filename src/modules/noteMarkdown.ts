@@ -250,6 +250,336 @@ function normalizeMarkdownBlockBoundaries(markdown: string): string {
 const DISPLAY_MATH_ENVIRONMENTS =
   "equation\\*?|align\\*?|gather\\*?|multline\\*?|eqnarray\\*?";
 
+const TEX_COMMANDS = new Set(
+  `sqrt frac dfrac tfrac cfrac pi alpha beta gamma delta epsilon varepsilon theta vartheta lambda mu sigma omega phi varphi psi rho tau eta kappa xi zeta nu chi Gamma Delta Theta Lambda Sigma Omega Phi Psi Pi sum prod int oint iint iiint lim log ln exp sin cos tan cot sec csc arcsin arccos arctan sinh cosh tanh min max arg inf sup det dim ker gcd Pr left right bigl bigr Bigl Bigr biggl biggr Biggl Biggr big Big bigg Bigg mathbf mathrm mathit mathbb mathcal mathfrak operatorname boldsymbol textbf text textrm textit overline underline hat bar tilde vec dot ddot binom cdot times div pm mp leq geq neq approx equiv sim propto infty partial nabla forall exists in notin subset subseteq supset supseteq cup cap to rightarrow leftarrow Rightarrow Leftarrow mapsto ldots cdots vdots ddots quad qquad displaystyle boxed overbrace underbrace overset underset stackrel ell hbar circ bullet star ast oplus otimes wedge vee langle rangle lvert rvert lVert rVert vert Vert mid parallel perp angle emptyset varnothing Re Im not widehat widetilde overrightarrow overleftarrow substack begin end tag label color cancel cong simeq iff implies`.split(
+    /\s+/,
+  ),
+);
+
+const MATH_WORD = new Set(
+  `alpha beta gamma delta epsilon theta lambda sigma omega phi psi rho tau eta kappa xi zeta chi pi sum prod log exp sin cos tan min max inf sup det dim arg mod gcd init mid left right`.split(
+    /\s+/,
+  ),
+);
+
+function isTexCommand(name: string): boolean {
+  return TEX_COMMANDS.has(name);
+}
+
+function isProseWord(token: string): boolean {
+  return /^[A-Za-z]{2,}$/.test(token) && !MATH_WORD.has(token.toLowerCase());
+}
+
+function hasTexSignal(text: string): boolean {
+  if (/_\{|\^\{/.test(text)) return true;
+  const commands = text.matchAll(/\\([a-zA-Z]+)/g);
+  for (const match of commands) {
+    if (isTexCommand(match[1])) return true;
+  }
+  return false;
+}
+
+function proseWordCount(text: string): number {
+  let stripped = text.replace(/\\[a-zA-Z]+/g, " ");
+  let previous = "";
+  while (stripped !== previous) {
+    previous = stripped;
+    stripped = stripped.replace(/\{[^{}]*\}/g, " ");
+  }
+  return stripped.split(/[^A-Za-z]+/).filter((word) => isProseWord(word))
+    .length;
+}
+
+function isMathSyntaxChar(ch: string): boolean {
+  return /[\s0-9A-Za-z_^{}\\()[\]=+\-*/<>|.,:;~'!≈≠≤≥αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩϵϑϕϖϱς]/.test(
+    ch,
+  );
+}
+
+/** A whole line of TeX, with no surrounding prose, becomes display math. */
+function isDisplayTexLine(core: string): boolean {
+  if (!core || /[$`]/.test(core) || core.includes("\u0000")) return false;
+  if (!hasTexSignal(core) || proseWordCount(core) > 0) return false;
+  const residue = core
+    .replace(/\\[a-zA-Z]+/g, "")
+    .replace(
+      /[\s0-9A-Za-z_^{}\\()[\]=+\-*/<>|.,:;~'!≈≠≤≥αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩϵϑϕϖϱς]/g,
+      "",
+    );
+  if (residue.length > 0) return false;
+  return /[=≈≠≤≥]|_\{|\^\{|\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|begin|leq|geq|neq|approx)\b/.test(
+    core,
+  );
+}
+
+function readTexCommand(text: string, index: number): string | null {
+  if (text[index] !== "\\") return null;
+  const match = /^\\([a-zA-Z]+)/.exec(text.slice(index));
+  if (!match || !isTexCommand(match[1])) return null;
+  return match[0];
+}
+
+function consumeBalanced(
+  text: string,
+  from: number,
+  open: string,
+  close: string,
+): number {
+  if (text[from] !== open) return from;
+  let depth = 0;
+  for (let index = from; index < text.length; index++) {
+    const ch = text[index];
+    if (ch === "\u0000") return from;
+    if (ch === "\\") {
+      index += 1;
+      continue;
+    }
+    if (ch === open) depth += 1;
+    else if (ch === close) {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return from;
+}
+
+function expandMathRange(
+  text: string,
+  signalIndex: number,
+): [number, number] | null {
+  let start = signalIndex;
+  let end = signalIndex;
+  const command = readTexCommand(text, start);
+  if (command) {
+    end = start + command.length;
+  } else if (text.startsWith("_{", start) || text.startsWith("^{", start)) {
+    // Leave the opening brace so the balanced scanner consumes its pair.
+    end = start + 1;
+  } else {
+    return null;
+  }
+
+  let guard = 0;
+  while (end < text.length && guard++ < text.length) {
+    const ch = text[end];
+    if (ch === "\u0000" || ch === "\n") break;
+    if (ch === "{" || ch === "(" || ch === "[") {
+      const close = ch === "{" ? "}" : ch === "(" ? ")" : "]";
+      const next = consumeBalanced(text, end, ch, close);
+      if (next === end) break;
+      end = next;
+      continue;
+    }
+    const nextCommand = readTexCommand(text, end);
+    if (nextCommand) {
+      end += nextCommand.length;
+      continue;
+    }
+    if (ch === "\\") break;
+    if (/[A-Za-z]/.test(ch)) {
+      const word = /^[A-Za-z]+/.exec(text.slice(end))?.[0] ?? ch;
+      const previous = end > 0 ? text[end - 1] : "";
+      const attached = /[\\_^{(]/.test(previous);
+      const follower = text[end + word.length] ?? "";
+      if (!attached && isProseWord(word) && !/[_^{\\]/.test(follower)) break;
+      end += word.length;
+      continue;
+    }
+    if (
+      /[0-9_^αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩϵϑϕϖϱς]/.test(ch)
+    ) {
+      end += 1;
+      continue;
+    }
+    if (/[=+\-*/<>|.,:;~'!≈≠≤≥]/.test(ch)) {
+      if (
+        ch === "." &&
+        (end + 1 === text.length || /\s/.test(text[end + 1] ?? ""))
+      ) {
+        break;
+      }
+      end += 1;
+      continue;
+    }
+    if (ch === " ") {
+      const rest = text.slice(end + 1);
+      if (!rest || !isMathSyntaxChar(rest[0]) || rest[0] === " ") break;
+      const nextWord = /^[A-Za-z]+/.exec(rest)?.[0];
+      const follower = nextWord ? (rest[nextWord.length] ?? "") : "";
+      if (nextWord && isProseWord(nextWord) && !/[_^{\\]/.test(follower)) {
+        break;
+      }
+      end += 1;
+      continue;
+    }
+    break;
+  }
+
+  guard = 0;
+  while (start > 0 && guard++ < text.length) {
+    const ch = text[start - 1];
+    if (ch === "\u0000" || ch === "\n") break;
+    if (ch === "}" || ch === ")" || ch === "]") break;
+    if (/[A-Za-z]/.test(ch)) {
+      let wordStart = start - 1;
+      while (wordStart > 0 && /[A-Za-z]/.test(text[wordStart - 1])) {
+        wordStart -= 1;
+      }
+      const word = text.slice(wordStart, start);
+      const previous = wordStart > 0 ? text[wordStart - 1] : "";
+      if (!/[\\_^{(]/.test(previous) && isProseWord(word)) break;
+      start = wordStart;
+      continue;
+    }
+    if (
+      /[0-9_^{}\\αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩϵϑϕϖϱς]/.test(
+        ch,
+      )
+    ) {
+      start -= 1;
+      continue;
+    }
+    if (/[=+\-*/<>|.,:;~'!(≈≠≤≥]/.test(ch)) {
+      start -= 1;
+      continue;
+    }
+    if (ch === " ") {
+      const previous = text.slice(0, start - 1);
+      const previousChar = previous.slice(-1);
+      if (
+        !previousChar ||
+        !isMathSyntaxChar(previousChar) ||
+        previousChar === " "
+      ) {
+        break;
+      }
+      const word = previous.match(/[A-Za-z]+$/);
+      if (word && isProseWord(word[0])) {
+        const before = previous.slice(0, -word[0].length);
+        if (!/[\\_^{(]$/.test(before)) break;
+      }
+      start -= 1;
+      continue;
+    }
+    break;
+  }
+
+  while (start < end && text[start] === " ") start += 1;
+  while (end > start && text[end - 1] === " ") end -= 1;
+  if (end <= start || !hasTexSignal(text.slice(start, end))) return null;
+  return [start, end];
+}
+
+function findTexSignal(text: string, from: number): number {
+  const pattern = /\\([a-zA-Z]+)|_\{|\^\{/g;
+  pattern.lastIndex = from;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text))) {
+    if (match[1] && !isTexCommand(match[1])) continue;
+    return match.index;
+  }
+  return -1;
+}
+
+function mergeRanges(ranges: Array<[number, number]>): Array<[number, number]> {
+  const sorted = [...ranges].sort((left, right) => left[0] - right[0]);
+  const merged: Array<[number, number]> = [];
+  for (const range of sorted) {
+    const previous = merged[merged.length - 1];
+    if (!previous || range[0] > previous[1]) merged.push([range[0], range[1]]);
+    else previous[1] = Math.max(previous[1], range[1]);
+  }
+  return merged;
+}
+
+function wrapInlineTexSpans(line: string): string {
+  const ranges: Array<[number, number]> = [];
+  let from = 0;
+  while (from < line.length) {
+    const signal = findTexSignal(line, from);
+    if (signal < 0) break;
+    const range = expandMathRange(line, signal);
+    if (!range) {
+      from = signal + 1;
+      continue;
+    }
+    ranges.push(range);
+    from = range[1];
+  }
+  let output = line;
+  for (const [start, end] of mergeRanges(ranges).reverse()) {
+    const raw = output.slice(start, end);
+    const lead = raw.match(/^\s*/)?.[0] ?? "";
+    const trail = raw.match(/\s*$/)?.[0] ?? "";
+    const chunk = raw.slice(lead.length, raw.length - trail.length);
+    if (!chunk || chunk.includes("$")) continue;
+    output = `${output.slice(0, start)}${lead}$${chunk}$${trail}${output.slice(end)}`;
+  }
+  return output;
+}
+
+/**
+ * Models often emit TeX with no `$`, `\(...\)`, or `\[...\]`.
+ * KaTeX only runs on delimited math, so those lines stay as `\sqrt` source.
+ * Code placeholders are masked and already-delimited math is left untouched.
+ */
+function promoteUndelimitedTex(text: string): string {
+  const saved: string[] = [];
+  const protect = (match: string): string => {
+    const token = `AIBUTLERDELIM${saved.length}END`;
+    saved.push(match);
+    return token;
+  };
+  let working = text.replace(
+    new RegExp(
+      `\\\\begin\\{(${DISPLAY_MATH_ENVIRONMENTS})\\}[\\s\\S]*?\\\\end\\{\\1\\}`,
+      "g",
+    ),
+    protect,
+  );
+  working = working
+    .replace(/\\\[[\s\S]*?\\\]/g, protect)
+    .replace(/\$\$[\s\S]*?\$\$/g, protect)
+    .replace(/\\\([\s\S]*?\\\)/g, protect)
+    .replace(
+      /(^|[^$])\$(?!\$)(?:\\\$|[^$\n])+?\$(?!\$)/g,
+      (match, prefix: string) =>
+        `${prefix}${protect(match.slice(prefix.length))}`,
+    );
+
+  working = working
+    .split("\n")
+    .map((line) => {
+      const maskedSlots: string[] = [];
+      const masked = line.replace(
+        /AIBUTLER(?:DELIM|CODEBLOCK)\d+END/g,
+        (token) => {
+          maskedSlots.push(token);
+          return "\u0000";
+        },
+      );
+      if (!hasTexSignal(masked)) {
+        return line;
+      }
+      const indent = masked.match(/^\s*/)?.[0] ?? "";
+      const trail = masked.match(/\s*$/)?.[0] ?? "";
+      const body = masked.slice(indent.length, masked.length - trail.length);
+      const punct = /[.。]$/.test(body) ? body.slice(-1) : "";
+      const core = (punct ? body.slice(0, -1) : body).trimEnd();
+      const promoted = isDisplayTexLine(core)
+        ? `${indent}$$${core}$$${punct}${trail}`
+        : wrapInlineTexSpans(masked);
+      let slot = 0;
+      return promoted.replace(/\u0000/g, () => maskedSlots[slot++] ?? "");
+    })
+    .join("\n");
+
+  return working.replace(
+    /AIBUTLERDELIM(\d+)END/g,
+    (_match, index: string) => saved[parseInt(index, 10)] ?? _match,
+  );
+}
+
 function protectDisplayCode(markdown: string): {
   text: string;
   codeBlocks: string[];
@@ -322,6 +652,9 @@ export function extractDisplayFormulas(markdown: string): {
   });
   // Some models emit double-escaped delimiters: \\( \\) \\[ \\]
   text = text.replace(/\\\\([()[\]])/g, "\\$1");
+  // \\sqrt / \\frac outside code become \sqrt / \frac before delimiter matching.
+  text = text.replace(/\\{2,}(?=[a-zA-Z])/g, "\\");
+  text = promoteUndelimitedTex(text);
 
   const pushFormula = (content: string, isBlock: boolean): string => {
     const placeholder = `AI_BUTLER_FORMULA_${isBlock ? "BLOCK" : "INLINE"}_${formulas.length}_END`;
