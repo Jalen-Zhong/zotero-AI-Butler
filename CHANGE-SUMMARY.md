@@ -1,35 +1,26 @@
-# 5.0.0-beta.2-jalen.2
+# 5.0.0-beta.2-jalen.3
 
-Fork-only build. Agent stays. Chat is the paper Q&A window, in the sidebar and in the main window.
+Fork-only build. Sidebar and main Chat are pure black with white text. Agent stays.
 
-## Root cause of the remaining raw LaTeX
+## Why jalen.2 still looked gray
 
-jalen.1 loaded KaTeX CSS and rendered delimited math (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`). The installed Chat screenshot still shows source such as `d = \sqrt{D_{KL}(\pi || \pi_{init})}` and `R_{BoN}(d) = d(\alpha_{BoN} - \beta_{BoN} d)`.
-
-That is undelimited TeX. `extractDisplayFormulas` only pulls math that already has delimiters, so KaTeX never ran. Missing CSS looks different: glyph text such as `tγ = Ω (...)` with no `\sqrt`. The quick-chat sanitizers are not the cause. `sanitizeQuickChatDomString` only drops unsafe control characters, and `normalizeQuickChatXhtml` only rewrites `&nbsp;` and void tags. Neither removes `.katex` or `.katex-display`.
+- `.ai-butler-sidebar-shell` defaulted to a light blue-white gradient. The darker shell existed only inside `@media (prefers-color-scheme: dark)`. Zotero on macOS often stays light, so the pane chrome stayed gray around the chat.
+- Pref `markdownTheme=github` injects `#ffffff` / `#f6f8fa` for `.markdown-body`, code, and tables. Those rules share the item-pane document with Chat.
+- `renderItemPaneSection` kept the existing DOM whenever Quick Chat was already on screen. After an XPI upgrade that DOM could still be the old Full Chat card stacked above Quick Chat, so the new page-mode chat never replaced it.
 
 ## What changed
 
-- Before display HTML is built, undelimited TeX is wrapped. A whole equation line becomes `$$...$$`. A formula inside a sentence becomes `$...$`. Double-escaped `\\sqrt` is normalized to `\sqrt` first. Fenced code and already-delimited math are left alone. The same pass feeds Chat, Summary follow-up, and Agent.
-- Chat surfaces (sidebar Chat tab and main Chat tab) use a black background and white text, including `.katex { color: #fff }`.
-- The sidebar Chat tab is the full-height page chat (thread list, new, delete). It does not use the 200px `sidebarQuickChatHeight` pref. The old “open chat” card is no longer stacked above it. A ↗ control still opens the main Chat tab.
-
-## Files
-
-- `src/modules/noteMarkdown.ts`
-- `src/modules/quickChatDom.ts` (new)
-- `src/modules/ItemPaneSection.ts`
-- `src/modules/views/ChatView.ts`
-- `test/noteMarkdown.test.ts`
-- `package.json` version `5.0.0-beta.2-jalen.2`
+- The sidebar shell, topbar, and tabs are `#000` / `#fff` with no light gradient and no `prefers-color-scheme` switch.
+- Chat messages, bubbles, code, tables, blockquote, and `.markdown-body` inside `#ai-butler-inline-chat` are forced to `#000` background and `#fff` text. `.katex` stays white on a transparent background.
+- The Chat tab only mounts `renderChatArea(..., { mode: "page" })`, with ↗ to open the main Chat tab. It does not render the Full Chat card.
+- A layout generation of `3` is stored on the shell. A re-render rebuilds the pane when that attribute is missing or when `.ai-butler-sidebar-chat-entry` is still in the DOM.
 
 ## Verify in Zotero
 
-1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.2.xpi`, restart Zotero, select a paper.
-2. Sidebar Chat should fill the item pane under the tabs, black background, white text, with the thread list, + Chat, and Delete. ↗ opens the main Chat tab for the same paper.
-3. Ask for the undelimited lines `d = \sqrt{D_{KL}(\pi || \pi_{init})}` and `R_{BoN}(d) = d(\alpha_{BoN} - \beta_{BoN} d)`, and for `$E=mc^2$`. They should typeset, including the white KaTeX glyphs. The same thread should appear in the main Chat tab.
-4. Agent still opens. Summary follow-up still typesets delimited and undelimited formulas.
+1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.3.xpi` and restart Zotero. Select the same paper again if the old card is still visible once; the pane rebuilds when that card or a pre-v3 shell is present.
+2. Sidebar Chat should be black from the tabs through the composer. Text and formulas are white. There is no teal Full Chat card above the thread.
+3. Main Chat (↗ or the Chat tab) uses the same black thread.
 
-## Prefs already on this Mac
+## Prefs
 
-Fork defaults hide note, table, and image summary and start the sidebar on Chat. This build does not rewrite `sidebarModuleVisibility` or `sidebarQuickChatHeight`. Page-mode Chat ignores that height.
+This build does not rewrite `markdownTheme` or `sidebarQuickChatHeight`. GitHub markdown colors are overridden inside Chat only. Page-mode Chat still ignores the 200px height pref.

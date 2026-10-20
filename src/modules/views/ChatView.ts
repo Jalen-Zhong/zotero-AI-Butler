@@ -41,8 +41,8 @@ export class ChatView extends BaseView {
         minWidth: "0",
         minHeight: "0",
         overflow: "hidden",
-        backgroundColor: "#0e0e0e",
-        color: "#f5f5f5",
+        backgroundColor: "#000",
+        color: "#fff",
       },
     });
     const bar = this.createElement("div", {
@@ -52,8 +52,8 @@ export class ChatView extends BaseView {
         gap: "8px",
         flex: "0 0 auto",
         padding: "10px 12px",
-        color: "#f5f5f5",
-        backgroundColor: "#141414",
+        color: "#fff",
+        backgroundColor: "#000",
         borderBottom: "1px solid rgba(255, 255, 255, 0.12)",
       },
     });
@@ -69,8 +69,8 @@ export class ChatView extends BaseView {
         marginLeft: "auto",
         border: "1px solid rgba(255, 255, 255, 0.28)",
         borderRadius: "6px",
-        background: "#111",
-        color: "#f5f5f5",
+        background: "#000",
+        color: "#fff",
         padding: "4px 8px",
         cursor: "pointer",
         font: "inherit",
@@ -92,8 +92,8 @@ export class ChatView extends BaseView {
         display: "flex",
         flexDirection: "column",
         padding: "0",
-        backgroundColor: "#0e0e0e",
-        color: "#f5f5f5",
+        backgroundColor: "#000",
+        color: "#fff",
         boxSizing: "border-box",
       },
     });
@@ -144,7 +144,7 @@ export class ChatView extends BaseView {
       textContent: getString("chat-view-empty"),
       styles: {
         margin: "auto",
-        color: "#f5f5f5",
+        color: "#fff",
         fontSize: "13px",
         textAlign: "center",
       },

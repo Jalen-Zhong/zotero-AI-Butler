@@ -913,6 +913,17 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
   return !!body.querySelector("#ai-butler-inline-chat");
 }
 
+/** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
+const SIDEBAR_LAYOUT_GENERATION = "3";
+
+function sidebarChromeIsCurrent(body: HTMLElement): boolean {
+  if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
+  const shell = body.querySelector(".ai-butler-sidebar-shell");
+  return (
+    shell?.getAttribute("data-ai-butler-layout") === SIDEBAR_LAYOUT_GENERATION
+  );
+}
+
 function persistActiveQuickChatThread(): void {
   try {
     if (currentChatState.itemId != null && currentChatState.threadId) {
@@ -957,7 +968,8 @@ function renderItemPaneSection(
     item.isRegularItem() &&
     currentChatState.itemId === item.id &&
     body.childNodes.length > 0 &&
-    (currentChatState.isChatting || sidebarHasQuickChat(body))
+    (currentChatState.isChatting || sidebarHasQuickChat(body)) &&
+    sidebarChromeIsCurrent(body)
   ) {
     sidebarRenderContext = {
       body,
@@ -992,6 +1004,8 @@ function renderItemPaneSection(
     min-height: 0;
     overflow: hidden;
     box-sizing: border-box;
+    background: #000;
+    color: #fff;
   `;
 
   // 检查是否有有效的文献条目
@@ -1045,6 +1059,9 @@ function renderItemPaneSection(
 
   const shell = doc.createElement("div");
   shell.className = "ai-butler-sidebar-shell";
+  shell.setAttribute("data-ai-butler-layout", SIDEBAR_LAYOUT_GENERATION);
+  shell.style.background = "#000";
+  shell.style.color = "#fff";
 
   const header = doc.createElement("div");
   header.className = "ai-butler-sidebar-topbar";
@@ -1353,10 +1370,21 @@ function cleanupSidebarWorkspace(body: HTMLElement): void {
 }
 
 function ensureSidebarWorkspaceStyles(doc: Document): void {
-  if (doc.getElementById("ai-butler-sidebar-workspace-styles")) return;
+  const existing = doc.getElementById("ai-butler-sidebar-workspace-styles");
+  if (
+    existing?.getAttribute("data-ai-butler-layout") ===
+    SIDEBAR_LAYOUT_GENERATION
+  ) {
+    return;
+  }
+  existing?.remove();
 
-  const style = doc.createElement("style");
+  const style = doc.createElementNS(
+    "http://www.w3.org/1999/xhtml",
+    "style",
+  ) as HTMLStyleElement;
   style.id = "ai-butler-sidebar-workspace-styles";
+  style.setAttribute("data-ai-butler-layout", SIDEBAR_LAYOUT_GENERATION);
   style.textContent = `
     .ai-butler-sidebar-shell,
     .ai-butler-sidebar-shell * {
@@ -1364,13 +1392,13 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     }
 
     .ai-butler-sidebar-shell {
-      --ai-butler-accent: #59c0bc;
-      --ai-butler-border: rgba(88, 166, 205, 0.16);
-      --ai-butler-soft-border: rgba(88, 166, 205, 0.1);
-      --ai-butler-muted: rgba(96, 108, 122, 0.72);
-      --ai-butler-surface: rgba(255, 255, 255, 0.78);
-      --ai-butler-surface-strong: rgba(242, 249, 253, 0.86);
-      --ai-butler-blue-bg: #f8fcff;
+      --ai-butler-accent: #fff;
+      --ai-butler-border: rgba(255, 255, 255, 0.18);
+      --ai-butler-soft-border: rgba(255, 255, 255, 0.12);
+      --ai-butler-muted: rgba(255, 255, 255, 0.72);
+      --ai-butler-surface: #000;
+      --ai-butler-surface-strong: #000;
+      --ai-butler-blue-bg: #000;
       display: flex;
       flex-direction: column;
       width: 100%;
@@ -1380,13 +1408,11 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       min-height: 0;
       overflow: hidden;
       overscroll-behavior: contain;
-      border: 1px solid rgba(91, 174, 216, 0.16);
-      border-bottom-color: rgba(128, 128, 128, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-bottom-color: rgba(255, 255, 255, 0.16);
       border-radius: 14px 14px 0 0;
-      background:
-        linear-gradient(180deg, rgba(240, 249, 255, 0.82), rgba(250, 253, 255, 0.78) 82px, rgba(255, 255, 255, 0.62)),
-        var(--ai-butler-blue-bg);
-      color: inherit;
+      background: #000 !important;
+      color: #fff !important;
     }
 
     .ai-butler-sidebar-topbar {
@@ -1397,6 +1423,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       padding: 10px 10px 8px;
       border-bottom: 1px solid var(--ai-butler-soft-border);
       flex: 0 0 auto;
+      background: #000;
+      color: #fff;
     }
 
     .ai-butler-sidebar-title-wrap {
@@ -1430,8 +1458,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       justify-content: center;
       border: 1px solid var(--ai-butler-border);
       border-radius: 9px;
-      background: rgba(128, 128, 128, 0.045);
-      color: inherit;
+      background: #000;
+      color: #fff;
       cursor: pointer;
       font-size: 15px;
       line-height: 1;
@@ -1453,7 +1481,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       width: 30px;
       height: 30px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.72);
+      background: #000;
+      color: #fff;
     }
 
     .ai-butler-sidebar-tabs {
@@ -1464,9 +1493,10 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       min-width: 0;
       width: 100%;
       padding: 8px 10px;
-      border-bottom: 1px solid rgba(91, 174, 216, 0.12);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.16);
       border-radius: 14px 14px 0 0;
-      background: rgba(247, 252, 255, 0.82);
+      background: #000;
+      color: #fff;
       overflow: visible;
       flex: 0 0 auto;
     }
@@ -1482,7 +1512,7 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       border: 1px solid transparent;
       border-radius: 999px;
       background: transparent;
-      color: inherit;
+      color: #fff;
       cursor: pointer;
       font: inherit;
       font-size: 12px;
@@ -1531,8 +1561,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       padding: 5px;
       border: 1px solid var(--ai-butler-border);
       border-radius: 10px;
-      background: rgba(250, 250, 250, 0.98);
-      color: #1f2933;
+      background: #000;
+      color: #fff;
       box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
     }
 
@@ -1569,6 +1599,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       overscroll-behavior: contain;
       padding: 0;
       scrollbar-width: thin;
+      background: #000;
+      color: #fff;
     }
 
     .ai-butler-sidebar-tab-panel {
@@ -1603,8 +1635,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       height: 100%;
       min-height: 0;
       padding: 0;
-      background: #0e0e0e;
-      color: #f5f5f5;
+      background: #000;
+      color: #fff;
     }
 
     .ai-butler-sidebar-tab-panel[data-tab-id="chat"] > #ai-butler-inline-chat {
@@ -1656,7 +1688,7 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       align-items: center;
       justify-content: center;
       padding: 18px;
-      color: rgba(128, 128, 128, 0.85);
+      color: #fff;
       font-size: 12px;
       text-align: center;
     }
@@ -1670,38 +1702,6 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       }
     }
 
-    @media (prefers-color-scheme: dark) {
-      .ai-butler-sidebar-shell {
-        --ai-butler-accent: #71d7d2;
-        --ai-butler-border: rgba(112, 184, 214, 0.2);
-        --ai-butler-soft-border: rgba(112, 184, 214, 0.14);
-        --ai-butler-muted: rgba(203, 213, 225, 0.64);
-        --ai-butler-surface: rgba(15, 23, 42, 0.42);
-        --ai-butler-surface-strong: rgba(20, 34, 48, 0.62);
-        --ai-butler-blue-bg: #111820;
-        border-color: rgba(112, 184, 214, 0.18);
-        border-bottom-color: rgba(148, 163, 184, 0.12);
-        background:
-          linear-gradient(180deg, rgba(17, 33, 45, 0.72), rgba(15, 23, 42, 0.58) 86px, rgba(15, 23, 42, 0.38)),
-          var(--ai-butler-blue-bg);
-      }
-
-      .ai-butler-sidebar-tabs {
-        border-bottom-color: rgba(112, 184, 214, 0.14);
-        background: rgba(17, 31, 42, 0.78);
-      }
-
-      .ai-butler-sidebar-icon-button,
-      .ai-butler-sidebar-refresh {
-        background: rgba(15, 23, 42, 0.55);
-        border-color: rgba(148, 163, 184, 0.22);
-      }
-
-      .ai-butler-sidebar-more-menu {
-        background: rgba(24, 31, 39, 0.98);
-        color: #f3f4f6;
-      }
-    }
   `;
   const styleHost = doc.head || doc.documentElement;
   if (styleHost) styleHost.appendChild(style);
@@ -1795,16 +1795,12 @@ function renderSidebarTabPanel(
       renderNoteSection(panel, doc, item, "summary", { mode: "page" });
       break;
     case "chat":
-      if (isSidebarModuleEnabled("quickChat")) {
-        renderChatArea(panel, doc, item, true, {
-          mode: "page",
-          onOpenWindow: () => {
-            void handleOpenAIChat(item.id);
-          },
-        });
-      } else if (isSidebarModuleEnabled("actionButtons")) {
-        renderFullChatEntry(panel, doc, item, handleOpenAIChat);
-      }
+      renderChatArea(panel, doc, item, true, {
+        mode: "page",
+        onOpenWindow: () => {
+          void handleOpenAIChat(item.id);
+        },
+      });
       break;
     case "deepRead":
       renderNoteSection(panel, doc, item, "deepRead", { mode: "page" });
@@ -1824,40 +1820,6 @@ function renderSidebarTabPanel(
       }
       break;
   }
-}
-
-function renderFullChatEntry(
-  body: HTMLElement,
-  doc: Document,
-  item: Zotero.Item,
-  handleOpenAIChat: (itemId: number) => Promise<void>,
-): void {
-  const entry = doc.createElement("div");
-  entry.className = "ai-butler-sidebar-chat-entry";
-
-  const meta = doc.createElement("div");
-  meta.className = "ai-butler-sidebar-chat-entry-title";
-  const metaText = doc.createElement("span");
-  metaText.textContent = getString("itempane-ai-open-chat-tooltip");
-  meta.appendChild(metaText);
-
-  const fullChatBtn = createButton(
-    doc,
-    getString("itempane-ai-open-chat"),
-    true,
-  );
-  fullChatBtn.style.flex = "0 0 auto";
-  fullChatBtn.addEventListener("click", async () => {
-    try {
-      await handleOpenAIChat(item.id);
-    } catch (error: any) {
-      ztoolkit.log("[AI-Butler] 完整追问按钮点击失败:", error);
-    }
-  });
-
-  entry.appendChild(meta);
-  entry.appendChild(fullChatBtn);
-  body.appendChild(entry);
 }
 
 /**
@@ -3790,7 +3752,15 @@ async function loadMindmapContent(
 
  */
 async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
-  if (doc.getElementById("ai-butler-quick-chat-katex-style")) return;
+  const styleId = "ai-butler-quick-chat-katex-style";
+  const existing = doc.getElementById(styleId);
+  if (
+    existing?.getAttribute("data-ai-butler-layout") ===
+    SIDEBAR_LAYOUT_GENERATION
+  ) {
+    return;
+  }
+  existing?.remove();
   try {
     const { themeManager } = await import("./themeManager");
     const katexCss = await themeManager.loadKatexCss();
@@ -3799,7 +3769,8 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
       "http://www.w3.org/1999/xhtml",
       "style",
     ) as HTMLStyleElement;
-    styleEl.id = "ai-butler-quick-chat-katex-style";
+    styleEl.id = styleId;
+    styleEl.setAttribute("data-ai-butler-layout", SIDEBAR_LAYOUT_GENERATION);
     styleEl.textContent = `${katexCss}
 #ai-butler-inline-chat,
 #ai-butler-inline-chat * {
@@ -3845,22 +3816,38 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   white-space: nowrap !important;
   color: #fff !important;
 }
-#ai-butler-inline-chat {
-  background: #0e0e0e;
-  color: #f5f5f5;
-}
+#ai-butler-inline-chat,
 #ai-butler-inline-chat .ai-butler-quick-chat-messages,
+#ai-butler-inline-chat .ai-butler-quick-chat-pair,
 #ai-butler-inline-chat .ai-butler-quick-chat-user,
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant,
+#ai-butler-inline-chat .markdown-body,
+#ai-butler-inline-chat pre,
+#ai-butler-inline-chat code,
+#ai-butler-inline-chat kbd,
+#ai-butler-inline-chat samp,
+#ai-butler-inline-chat table,
+#ai-butler-inline-chat thead,
+#ai-butler-inline-chat tr,
+#ai-butler-inline-chat th,
+#ai-butler-inline-chat td,
+#ai-butler-inline-chat blockquote {
+  background: #000 !important;
+  background-color: #000 !important;
+  color: #fff !important;
+}
 #ai-butler-inline-chat textarea,
 #ai-butler-inline-chat select {
-  color: #f5f5f5;
+  background: #000 !important;
+  color: #fff !important;
 }
 #ai-butler-inline-chat .katex,
 #ai-butler-inline-chat .katex-display,
 #ai-butler-inline-chat .katex-html,
 #ai-butler-inline-chat .katex * {
   color: #fff !important;
+  background: transparent !important;
+  background-color: transparent !important;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant p {
   margin: 0.35em 0;
@@ -3878,13 +3865,13 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   margin: 0.9em 0 0.55em;
   line-height: 1.35;
   font-weight: 700;
-  color: inherit;
+  color: #fff !important;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant h1 {
   font-size: 1.2em;
   text-align: center;
   padding-bottom: 0.25em;
-  color: var(--main-10, inherit);
+  color: #fff !important;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant h1::after {
   content: "";
@@ -4072,8 +4059,8 @@ function renderChatArea(
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: ${isPageMode ? "0" : "10px"};
     overflow: hidden;
-    background: #0e0e0e;
-    color: #f5f5f5;
+    background: #000;
+    color: #fff;
     margin-bottom: ${isPageMode ? "0" : "12px"};
   `;
 
@@ -4084,8 +4071,8 @@ function renderChatArea(
     gap: 6px;
     flex: 0 0 auto;
     padding: 8px 10px;
-    background: #141414;
-    color: #f5f5f5;
+    background: #000;
+    color: #fff;
     border-bottom: 1px solid rgba(255, 255, 255, 0.12);
     font-size: 12px;
     font-weight: 500;
@@ -4180,8 +4167,8 @@ function renderChatArea(
     font-size: ${isPageMode ? "12px" : "10px"};
     border: 1px solid rgba(255, 255, 255, 0.28);
     border-radius: 3px;
-    background: #111;
-    color: #f5f5f5;
+    background: #000;
+    color: #fff;
     opacity: 1;
   `;
   const newThreadBtn = createQuickControlButton(
@@ -4237,8 +4224,8 @@ function renderChatArea(
   messagesArea.style.cssText = `
     height: ${isPageMode ? "auto" : `${currentQuickChatHeight}px`};
     ${isPageMode ? "flex: 1 1 auto;" : ""}
-    color: #f5f5f5;
-    background: #0e0e0e;
+    color: #fff;
+    background: #000;
     width: 100%;
     inline-size: 100%;
     max-width: 100%;
@@ -4277,7 +4264,7 @@ function renderChatArea(
     messagesArea.innerHTML = "";
     const list = Array.isArray(messages) ? messages : [];
     if (list.length === 0) {
-      messagesArea.innerHTML = `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-thread-empty"))}</div>`;
+      messagesArea.innerHTML = `<div style="color: #fff; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-thread-empty"))}</div>`;
       return;
     }
     let index = 0;
@@ -4307,7 +4294,7 @@ function renderChatArea(
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 8px;
         background: transparent;
-        color: #f5f5f5;
+        color: #fff;
         user-select: text;
         cursor: text;
       `;
@@ -4316,8 +4303,8 @@ function renderChatArea(
       userMsgDiv.style.cssText = `
         margin-bottom: 8px;
         padding: 8px;
-        background: rgba(89, 192, 188, 0.22);
-        color: #f5f5f5;
+        background: #000;
+        color: #fff;
         border-radius: 6px;
         border-left: 3px solid #59c0bc;
         user-select: text;
@@ -4332,8 +4319,8 @@ function renderChatArea(
         aiMsgDiv.style.cssText = `
           margin-bottom: 8px;
           padding: 8px;
-          background: #161616;
-          color: #f5f5f5;
+          background: #000;
+          color: #fff;
           border-radius: 6px;
           border-left: 3px solid #8ab4ff;
           width: 100%;
@@ -4550,7 +4537,7 @@ function renderChatArea(
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 11px;
-    color: #f5f5f5;
+    color: #fff;
   `;
 
   const createRelatedButton = (text: string, title?: string) => {
@@ -4616,7 +4603,7 @@ function renderChatArea(
 
   let quickChatPinnedToBottom = true;
 
-  const setRelatedStatus = (message: string, color = "#f5f5f5"): void => {
+  const setRelatedStatus = (message: string, color = "#fff"): void => {
     relatedStatus.textContent = message;
     relatedStatus.style.color = color;
   };
@@ -4729,7 +4716,7 @@ function renderChatArea(
       );
     }
     refreshThreadSelect();
-    messagesArea.innerHTML = `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${escapeHtmlForChat(message)}</div>`;
+    messagesArea.innerHTML = `<div style="color: #fff; text-align: center; padding: 10px;">${escapeHtmlForChat(message)}</div>`;
     quickChatPinnedToBottom = true;
     syncQuickChatThreadControls();
   }
@@ -4856,8 +4843,8 @@ function renderChatArea(
     flex: 0 0 auto;
     padding: 8px;
     border-top: 1px solid rgba(255, 255, 255, 0.12);
-    background: #0e0e0e;
-    color: #f5f5f5;
+    background: #000;
+    color: #fff;
   `;
 
   const composer = doc.createElement("div");
@@ -4871,8 +4858,8 @@ function renderChatArea(
     padding: 7px;
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 15px;
-    background: #0a0a0a;
-    color: #f5f5f5;
+    background: #000;
+    color: #fff;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   `;
 
@@ -4890,7 +4877,7 @@ function renderChatArea(
     font-size: 12px;
     line-height: 1.45;
     font-family: inherit;
-    color: #f5f5f5;
+    color: #fff;
     background: transparent;
   `;
 
@@ -5010,7 +4997,7 @@ function renderChatArea(
       refreshThreadSelect();
     }
 
-    messagesArea.innerHTML = `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-new-conversation-created"))}</div>`;
+    messagesArea.innerHTML = `<div style="color: #fff; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-new-conversation-created"))}</div>`;
     inputBox.value = "";
     resizeQuickChatInput();
     sendBtn.textContent = "↑";
@@ -5109,7 +5096,7 @@ function renderChatArea(
         const pdfMode = LLMService.getEffectivePdfProcessMode();
 
         showPdfStatus(
-          `<div style="color: #f5f5f5; text-align: center; padding: 10px;">${getString("itempane-chat-loading-pdf")}</div>`,
+          `<div style="color: #fff; text-align: center; padding: 10px;">${getString("itempane-chat-loading-pdf")}</div>`,
         );
 
         const { content: pdfContent, isBase64 } =
@@ -5231,7 +5218,7 @@ function renderChatArea(
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 8px;
       background: transparent;
-      color: #f5f5f5;
+      color: #fff;
       user-select: text;
       cursor: text;
     `;
@@ -5250,8 +5237,8 @@ function renderChatArea(
       contain: inline-size;
       margin-bottom: 8px;
       padding: 8px;
-      background: rgba(89, 192, 188, 0.22);
-      color: #f5f5f5;
+      background: #000;
+      color: #fff;
       border-radius: 6px;
       border-left: 3px solid #59c0bc;
       user-select: text;
@@ -5269,8 +5256,8 @@ function renderChatArea(
     aiMsgDiv.style.cssText = `
       margin-bottom: 8px;
       padding: 8px;
-      background: #161616;
-      color: #f5f5f5;
+      background: #000;
+      color: #fff;
       border-radius: 6px;
       border-left: 3px solid #8ab4ff;
       width: 100%;
@@ -5287,7 +5274,7 @@ function renderChatArea(
       user-select: text;
       cursor: text;
     `;
-    aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <em style="color: #f5f5f5;">${getString("itempane-thinking")}</em>`;
+    aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <em style="color: #fff;">${getString("itempane-thinking")}</em>`;
     pairWrapper.appendChild(aiMsgDiv);
 
     // 创建保存按钮区域（初始隐藏）
@@ -5503,10 +5490,10 @@ function renderChatArea(
           updateQuickChatAssistantMessage(
             aiMsgDiv,
             fullResponse,
-            `<div style="color: #f5f5f5; font-size: 11px; margin-top: 6px;">${getString("itempane-stopped-note")}</div>`,
+            `<div style="color: #fff; font-size: 11px; margin-top: 6px;">${getString("itempane-stopped-note")}</div>`,
           );
         } else {
-          aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <span style="color: #f5f5f5;">${getString("itempane-stopped-empty")}</span>`;
+          aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <span style="color: #fff;">${getString("itempane-stopped-empty")}</span>`;
         }
         return;
       }
