@@ -5,13 +5,13 @@ Fork-only build. Agent stays. Chat is the direct paper Q&A window.
 ## Root cause
 
 - 「打开对话」 / `chatWithAI` called `SummaryView.loadItemForChat`. That follow-up is in-memory only and has no ChatPersist new / list / delete.
-- Summary follow-up already turns `$...$` into KaTeX HTML, but `initMathJax` injected `katex.min.css` during mount, before the view moved into the dialog document. The dialog therefore showed KaTeX markup with no KaTeX CSS (garbled formulas). Sidebar quick chat created a XUL `<style>`, which does not style that HTML.
+- Summary follow-up already turns `$...$` into KaTeX HTML. Without `katex.min.css` in that dialog, the HTML's text reads as one flat line (`tγ = Ω (...)`), which is the screenshot. Streaming summary HTML also skipped KaTeX and used `marked` only.
 
 ## What changed
 
 - Main window **Chat** tab hosts the same full-height `renderChatArea(..., { mode: "page" })` used by the sidebar, including thread list, + Chat, and Delete (`ChatPersist`, per item).
 - 「打开对话」, the reader button, and the `chatWithAI` menu open that tab for the current item. The tab can also bind the paper selected in Zotero.
-- KaTeX CSS is linked in the dialog and injected as an HTML `<style>` (with font URLs rewritten) for Summary follow-up and for Chat.
+- The dialog links `katex.min.css` the same way as the other stylesheets, and Summary follow-up / summary card / streaming output inject that CSS again when the HTML is written. Summary markdown now goes through `markdownToDisplayHtml`. Chat uses the same stylesheet.
 - Agent replies render the same math delimiters through the safe DOM path; model HTML is still not an HTML sink.
 
 ## Files
@@ -26,6 +26,7 @@ Fork-only build. Agent stays. Chat is the direct paper Q&A window.
 - `src/modules/views/agent/AgentMarkdown.ts`
 - `src/modules/views/agent/AgentView.ts`
 - `addon/content/agent.css`
+- `addon/content/outputWindow.css`
 - `addon/locale/en-US/mainWindow.ftl`
 - `addon/locale/zh-CN/mainWindow.ftl`
 - `package.json` version `5.0.0-beta.2-jalen.1`

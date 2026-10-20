@@ -619,15 +619,15 @@ export class MainWindow {
       head.appendChild(agentLink);
     }
     if (!doc.getElementById("ai-butler-katex-css-link")) {
-      const katexLink = doc.createElementNS(
-        "http://www.w3.org/1999/xhtml",
-        "link",
-      ) as HTMLLinkElement;
+      const katexLink = doc.createElement("link");
       katexLink.id = "ai-butler-katex-css-link";
       katexLink.rel = "stylesheet";
       katexLink.href = `chrome://${config.addonRef}/content/katex.min.css`;
       head.appendChild(katexLink);
     }
+    void import("../katexStyle").then(({ injectHtmlKatexStyle }) =>
+      injectHtmlKatexStyle(doc, "ai-butler-katex-style"),
+    );
   }
 
   /**
