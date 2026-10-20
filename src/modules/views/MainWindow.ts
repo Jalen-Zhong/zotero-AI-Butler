@@ -32,6 +32,7 @@ import { prepareDocument } from "../../compatibility/document";
 import { DashboardView } from "./DashboardView";
 import { SummaryView } from "./SummaryView";
 import { AgentView } from "./agent/AgentView";
+import { ChatView } from "./ChatView";
 import { TaskQueueView } from "./TaskQueueView";
 import { SettingsView } from "./SettingsView";
 import { LibraryScannerView } from "./LibraryScannerView";
@@ -52,6 +53,7 @@ import {
 export type TabType =
   | "dashboard"
   | "summary"
+  | "chat"
   | "agent"
   | "tasks"
   | "settings"
@@ -141,6 +143,8 @@ export class MainWindow {
 
   private agentView: AgentView;
 
+  private chatView: ChatView;
+
   /** 任务队列视图 */
   private taskQueueView: TaskQueueView;
 
@@ -160,6 +164,7 @@ export class MainWindow {
     // 初始化各个视图
     this.dashboardView = new DashboardView();
     this.summaryView = new SummaryView();
+    this.chatView = new ChatView();
     this.agentView = new AgentView();
     this.taskQueueView = new TaskQueueView();
     this.settingsView = new SettingsView();
@@ -175,6 +180,7 @@ export class MainWindow {
     // 注册视图
     this.views.set("dashboard", this.dashboardView);
     this.views.set("summary", this.summaryView);
+    this.views.set("chat", this.chatView);
     this.views.set("agent", this.agentView);
     this.views.set("tasks", this.taskQueueView);
     this.views.set("settings", this.settingsView);
@@ -528,6 +534,11 @@ export class MainWindow {
           icon: "📝",
         },
         {
+          id: "chat",
+          label: getString("main-window-tab-chat"),
+          icon: "💬",
+        },
+        {
           id: "agent",
           label: getString("main-window-tab-agent"),
           icon: "✦",
@@ -606,6 +617,16 @@ export class MainWindow {
       agentLink.rel = "stylesheet";
       agentLink.href = `chrome://${config.addonRef}/content/agent.css`;
       head.appendChild(agentLink);
+    }
+    if (!doc.getElementById("ai-butler-katex-css-link")) {
+      const katexLink = doc.createElementNS(
+        "http://www.w3.org/1999/xhtml",
+        "link",
+      ) as HTMLLinkElement;
+      katexLink.id = "ai-butler-katex-css-link";
+      katexLink.rel = "stylesheet";
+      katexLink.href = `chrome://${config.addonRef}/content/katex.min.css`;
+      head.appendChild(katexLink);
     }
   }
 
@@ -769,6 +790,10 @@ export class MainWindow {
    */
   public getSummaryView(): SummaryView {
     return this.summaryView;
+  }
+
+  public getChatView(): ChatView {
+    return this.chatView;
   }
 
   /**

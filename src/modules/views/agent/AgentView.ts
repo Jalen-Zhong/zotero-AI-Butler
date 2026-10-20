@@ -6,6 +6,7 @@ import {
   type AgentSession,
 } from "../../agent/types";
 import { LLMEndpointManager } from "../../llmEndpointManager";
+import { ensureAgentKatexCss } from "./AgentMarkdown";
 import { AgentTimeline } from "./AgentTimeline";
 import { button, documentOf, element, t } from "./dom";
 import { AgentSelect, type AgentSelectOption } from "./AgentSelect";
@@ -290,6 +291,7 @@ export class AgentView extends BaseView {
 
   protected onShow(): void {
     this.applyTheme();
+    if (this.container) void ensureAgentKatexCss(documentOf(this.container));
     if (!this.compactMedia && this.container) {
       this.compactMedia =
         documentOf(this.container).defaultView?.matchMedia(

@@ -276,12 +276,16 @@ function prepareDisplayMathContent(raw: string): string {
   );
 }
 
-function renderKatexHtml(content: string, isBlock: boolean): string {
+function renderKatexHtml(
+  content: string,
+  isBlock: boolean,
+  trust = true,
+): string {
   const options = {
     throwOnError: false,
     displayMode: isBlock,
     output: "html" as const,
-    trust: true,
+    trust,
     strict: false as const,
   };
   let rendered = katex.renderToString(content, options);
@@ -293,6 +297,93 @@ function renderKatexHtml(content: string, isBlock: boolean): string {
   return rendered;
 }
 
+export type DisplayFormula = {
+  content: string;
+  isBlock: boolean;
+};
+
+/**
+ * Pull display and inline math out of Markdown before a parser sees it.
+ * Fenced and inline code is restored, so dollars inside code stay literal.
+ * Placeholders are stable tokens the caller replaces with KaTeX HTML.
+ */
+export function extractDisplayFormulas(markdown: string): {
+  markdown: string;
+  formulas: DisplayFormula[];
+} {
+  const formulas: DisplayFormula[] = [];
+  const protectedCode = protectDisplayCode(
+    stripInvalidXmlChars(String(markdown ?? "")).replace(/\r\n?/g, "\n"),
+  );
+  let text = protectedCode.text;
+
+  text = text.replace(/\$\$\$([\s\S]*?)\$\$\$/g, (_match, formula: string) => {
+    return `$$${formula.trim()}$$`;
+  });
+  // Some models emit double-escaped delimiters: \\( \\) \\[ \\]
+  text = text.replace(/\\\\([()[\]])/g, "\\$1");
+
+  const pushFormula = (content: string, isBlock: boolean): string => {
+    const placeholder = `AI_BUTLER_FORMULA_${isBlock ? "BLOCK" : "INLINE"}_${formulas.length}_END`;
+    formulas.push({ content: String(content || "").trim(), isBlock });
+    return placeholder;
+  };
+
+  text = text.replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) =>
+    pushFormula(formula, true),
+  );
+  text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_match, formula: string) =>
+    pushFormula(formula, true),
+  );
+  text = text.replace(
+    new RegExp(
+      `\\\\begin\\{(${DISPLAY_MATH_ENVIRONMENTS})\\}([\\s\\S]*?)\\\\end\\{\\1\\}`,
+      "g",
+    ),
+    (match) => pushFormula(match, true),
+  );
+  text = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, formula: string) =>
+    pushFormula(formula, false),
+  );
+  text = text.replace(
+    /(^|[^$])\$(?!\$)((?:\\\$|[^$\n])+?)\$(?!\$)/g,
+    (_match, prefix: string, formula: string) =>
+      `${prefix}${pushFormula(formula, false)}`,
+  );
+
+  text = text.replace(
+    /AIBUTLERCODEBLOCK(\d+)END/g,
+    (_match, index: string) =>
+      protectedCode.codeBlocks[parseInt(index, 10)] ?? _match,
+  );
+
+  return { markdown: text, formulas };
+}
+
+export function renderDisplayFormulaHtml(
+  formula: DisplayFormula | undefined,
+  options?: { trust?: boolean },
+): string {
+  if (!formula) return "";
+  const content = prepareDisplayMathContent(formula.content);
+  if (!content) return "";
+  const isBlock = formula.isBlock || requiresDisplayMath(content);
+  const trust = options?.trust !== false;
+  try {
+    const rendered = renderKatexHtml(content, isBlock, trust);
+    if (isBlock) {
+      return `<div class="katex-scroll-container">${rendered}</div>`;
+    }
+    return `<span class="katex-inline">${rendered}</span>`;
+  } catch {
+    const escapedContent = escapeHtml(content);
+    if (isBlock) {
+      return `<pre class="math-fallback">$$${escapedContent}$$</pre>`;
+    }
+    return `<code class="math-fallback">$${escapedContent}$</code>`;
+  }
+}
+
 /**
  * Convert Markdown into display HTML for plugin UI surfaces, including KaTeX
  * rendering for LaTeX formulas.
@@ -302,51 +393,8 @@ function renderKatexHtml(content: string, isBlock: boolean): string {
  * is protected first so literal dollars inside code stay literal.
  */
 export function markdownToDisplayHtml(markdown: string): string {
-  const formulas: ProtectedFormula[] = [];
-  const protectedCode = protectDisplayCode(
-    stripInvalidXmlChars(String(markdown ?? "")).replace(/\r\n?/g, "\n"),
-  );
-  let html = protectedCode.text;
-
-  html = html.replace(/\$\$\$([\s\S]*?)\$\$\$/g, (_match, formula: string) => {
-    return `$$${formula.trim()}$$`;
-  });
-  // Some models emit double-escaped delimiters: \\( \\) \\[ \\]
-  html = html.replace(/\\\\([()[\]])/g, "\\$1");
-
-  const pushFormula = (content: string, isBlock: boolean): string => {
-    const placeholder = `AI_BUTLER_FORMULA_${isBlock ? "BLOCK" : "INLINE"}_${formulas.length}_END`;
-    formulas.push({ content: String(content || "").trim(), isBlock });
-    return placeholder;
-  };
-
-  html = html.replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) =>
-    pushFormula(formula, true),
-  );
-  html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_match, formula: string) =>
-    pushFormula(formula, true),
-  );
-  html = html.replace(
-    new RegExp(
-      `\\\\begin\\{(${DISPLAY_MATH_ENVIRONMENTS})\\}([\\s\\S]*?)\\\\end\\{\\1\\}`,
-      "g",
-    ),
-    (match) => pushFormula(match, true),
-  );
-  html = html.replace(/\\\(([\s\S]*?)\\\)/g, (_match, formula: string) =>
-    pushFormula(formula, false),
-  );
-  html = html.replace(
-    /(^|[^$])\$(?!\$)((?:\\\$|[^$\n])+?)\$(?!\$)/g,
-    (_match, prefix: string, formula: string) =>
-      `${prefix}${pushFormula(formula, false)}`,
-  );
-
-  html = html.replace(
-    /AIBUTLERCODEBLOCK(\d+)END/g,
-    (_match, index: string) =>
-      protectedCode.codeBlocks[parseInt(index, 10)] ?? _match,
-  );
+  const extracted = extractDisplayFormulas(markdown);
+  let html = extracted.markdown;
 
   marked.setOptions({
     breaks: true,
@@ -360,25 +408,9 @@ export function markdownToDisplayHtml(markdown: string): string {
   }
 
   const renderFormula = (_match: string, _type: string, index: string) => {
-    const formulaData = formulas[parseInt(index, 10)];
+    const formulaData = extracted.formulas[parseInt(index, 10)];
     if (!formulaData) return _match;
-
-    const content = prepareDisplayMathContent(formulaData.content);
-    if (!content) return "";
-    const isBlock = formulaData.isBlock || requiresDisplayMath(content);
-    try {
-      const rendered = renderKatexHtml(content, isBlock);
-      if (isBlock) {
-        return `<div class="katex-scroll-container">${rendered}</div>`;
-      }
-      return `<span class="katex-inline">${rendered}</span>`;
-    } catch {
-      const escapedContent = escapeHtml(content);
-      if (isBlock) {
-        return `<pre class="math-fallback">$$${escapedContent}$$</pre>`;
-      }
-      return `<code class="math-fallback">$${escapedContent}$</code>`;
-    }
+    return renderDisplayFormulaHtml(formulaData);
   };
 
   html = html.replace(

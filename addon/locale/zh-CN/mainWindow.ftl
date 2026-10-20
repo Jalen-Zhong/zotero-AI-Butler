@@ -1,4 +1,7 @@
 main-window-tab-agent = Agent
+main-window-tab-chat = 对话
+chat-view-empty = 请先在 Zotero 中选择一篇文献，再打开对话。
+chat-view-use-selection = 使用当前文献
 agent-brand = 管家 Agent
 agent-sessions = 研究会话
 agent-new-session = 新建会话

@@ -1660,14 +1660,8 @@ async function handleOpenAIChat(itemId: number): Promise<void> {
   try {
     // 打开主窗口并切换到摘要视图
     const mainWin = MainWindow.getInstance();
-    await mainWin.open("summary");
-
-    // 获取 SummaryView 并加载文献
-    const summaryView = mainWin.getSummaryView();
-    if (summaryView) {
-      // 调用 loadItemForChat 方法加载文献并显示聊天界面
-      await (summaryView as any).loadItemForChat(itemId);
-    }
+    await mainWin.open("chat");
+    mainWin.getChatView().openItem(itemId);
   } catch (error: any) {
     ztoolkit.log("[AI-Butler] 打开 AI 追问失败:", error);
     new ztoolkit.ProgressWindow("AI Butler", {

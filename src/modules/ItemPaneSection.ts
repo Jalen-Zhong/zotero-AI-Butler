@@ -812,6 +812,16 @@ async function ensureSidebarAutoRefresh(): Promise<void> {
  *
  * @param handleOpenAIChat 打开 AI 追问的回调函数
  */
+export function mountPersistedItemChat(
+  host: HTMLElement,
+  item: Zotero.Item,
+): void {
+  const doc = host.ownerDocument;
+  if (!doc) return;
+  host.replaceChildren();
+  renderChatArea(host, doc, item, true, { mode: "page" });
+}
+
 export function registerItemPaneSection(
   handleOpenAIChat: (itemId: number) => Promise<void>,
 ): void {
@@ -3754,7 +3764,11 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   try {
     const { themeManager } = await import("./themeManager");
     const katexCss = await themeManager.loadKatexCss();
-    const styleEl = doc.createElement("style");
+    // XUL style nodes do not apply to the HTML KaTeX tree, which leaves formulas unstyled.
+    const styleEl = doc.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "style",
+    ) as HTMLStyleElement;
     styleEl.id = "ai-butler-quick-chat-katex-style";
     styleEl.textContent = `${katexCss}
 #ai-butler-inline-chat,
