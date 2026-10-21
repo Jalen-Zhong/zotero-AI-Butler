@@ -1036,7 +1036,10 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 }
 
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
-const SIDEBAR_LAYOUT_GENERATION = "8";
+const SIDEBAR_LAYOUT_GENERATION = "11";
+
+/** Stacked reader sections get this height. Never 0 — a 0px shell clips the tabs. */
+const SIDEBAR_STACKED_MIN_HEIGHT = 360;
 
 const renderedSidebarPanels = new WeakSet<HTMLElement>();
 
@@ -1162,11 +1165,13 @@ function renderItemPaneSection(
     padding: 0;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 13px;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     max-width: 100%;
     min-width: 0;
-    height: 100%;
-    min-height: 0;
+    height: auto;
+    min-height: ${SIDEBAR_STACKED_MIN_HEIGHT}px;
     overflow: hidden;
     box-sizing: border-box;
     background: #000;
@@ -1417,11 +1422,11 @@ function renderItemPaneSection(
   nav.appendChild(refreshBtn);
   shell.appendChild(nav);
   shell.appendChild(content);
-  body.appendChild(shell);
-  bindSidebarWheelTrap(shell);
 
-  const revealSidebar = (): void => {
-    if (!shell.isConnected || sidebarRenderContext?.itemId !== item.id) return;
+  try {
+    body.appendChild(shell);
+    bindSidebarWheelTrap(shell);
+    // The shell is connected, so the active tab can load its saved note now.
     activateTab(activeTab);
     const noteTabsToWarm = (["summary", "deepRead"] as const).filter(
       (tabId) => panels.has(tabId) && !renderedTabs.has(tabId),
@@ -1438,22 +1443,86 @@ function renderItemPaneSection(
       }
     };
     if (noteTabsToWarm.length) {
-      doc.defaultView?.setTimeout(() => warmSidebarNoteTab(0), 0);
+      const schedule = doc.defaultView
+        ? doc.defaultView.setTimeout.bind(doc.defaultView)
+        : setTimeout;
+      schedule(() => warmSidebarNoteTab(0), 0);
     }
-  };
-  if (doc.defaultView) doc.defaultView.setTimeout(revealSidebar, 0);
-  else setTimeout(revealSidebar, 0);
 
-  const ResizeObserverCtor = doc.defaultView?.ResizeObserver;
-  if (ResizeObserverCtor) {
-    const observer = new ResizeObserverCtor(relayoutSidebar);
-    observer.observe(nav);
-    observer.observe(body);
-    if (body.parentElement) observer.observe(body.parentElement);
-    sidebarWorkspaceResizeObservers.set(body, observer);
+    const ResizeObserverCtor = doc.defaultView?.ResizeObserver;
+    if (ResizeObserverCtor) {
+      const observer = new ResizeObserverCtor(relayoutSidebar);
+      observer.observe(nav);
+      observer.observe(body);
+      if (body.parentElement) observer.observe(body.parentElement);
+      sidebarWorkspaceResizeObservers.set(body, observer);
+    }
+
+    relayoutSidebar();
+    doc.defaultView?.setTimeout(relayoutSidebar, 0);
+  } catch (error) {
+    ztoolkit.log("[AI-Butler] 渲染侧边栏失败:", error);
+    if (!body.querySelector(".ai-butler-sidebar-shell")) {
+      const hint = doc.createElement("div");
+      hint.className = "ai-butler-sidebar-empty";
+      hint.textContent = getString("itempane-failed");
+      body.appendChild(hint);
+    }
   }
+}
 
-  doc.defaultView?.setTimeout(relayoutSidebar, 0);
+function sidebarElementIsHidden(el: HTMLElement): boolean {
+  if (el.hidden) return true;
+  const style = el.ownerDocument?.defaultView?.getComputedStyle(el);
+  return (
+    !!style && (style.display === "none" || style.visibility === "collapse")
+  );
+}
+
+/** Reader context pane shows every section at once. Sidenav mode hides the rest. */
+function sidebarPaneIsStacked(body: HTMLElement): boolean {
+  let node: HTMLElement | null = body;
+  for (let depth = 0; node && depth < 6; depth += 1) {
+    const parent = node.parentElement as HTMLElement | null;
+    if (!parent) break;
+    const visibleSectionSiblings = Array.from(parent.children).filter(
+      (child) => {
+        if (child === node) return false;
+        const el = child as HTMLElement;
+        if (sidebarElementIsHidden(el)) return false;
+        const isSection =
+          el.localName === "item-pane-section" ||
+          el.localName === "collapsible-section" ||
+          el.hasAttribute("data-pane") ||
+          !!el.querySelector?.(
+            "item-pane-section, collapsible-section, [data-pane]",
+          );
+        if (!isSection) return false;
+        const box = el.getBoundingClientRect?.();
+        return !!box && box.height > 24;
+      },
+    );
+    if (visibleSectionSiblings.length > 0) return true;
+    node = parent;
+  }
+  return false;
+}
+
+function applySidebarBoxHeight(
+  body: HTMLElement,
+  shell: HTMLElement,
+  heightPx: number,
+): void {
+  const safe = Number.isFinite(heightPx)
+    ? Math.max(SIDEBAR_STACKED_MIN_HEIGHT, Math.floor(heightPx))
+    : SIDEBAR_STACKED_MIN_HEIGHT;
+  const px = `${safe}px`;
+  body.style.height = px;
+  body.style.minHeight = px;
+  body.style.maxHeight = "none";
+  shell.style.height = px;
+  shell.style.minHeight = px;
+  shell.style.maxHeight = px;
 }
 
 function fitSidebarShellToViewport(
@@ -1463,7 +1532,10 @@ function fitSidebarShellToViewport(
   const doc = body.ownerDocument;
   if (!doc) return;
   const view = doc.defaultView;
-  if (!view) return;
+  if (!view) {
+    applySidebarBoxHeight(body, shell, SIDEBAR_STACKED_MIN_HEIGHT);
+    return;
+  }
 
   const rect = body.getBoundingClientRect();
   const bottomInset = 8;
@@ -1471,13 +1543,20 @@ function fitSidebarShellToViewport(
   const available = Math.floor(
     view.innerHeight - Math.max(0, rect.top) - bottomInset,
   );
-  const targetHeight = Math.max(0, available);
-
-  body.style.height = `${targetHeight}px`;
-  body.style.minHeight = `${targetHeight}px`;
-  shell.style.height = `${targetHeight}px`;
-  shell.style.minHeight = `${targetHeight}px`;
-  shell.style.maxHeight = `${targetHeight}px`;
+  const notLaidOut = rect.width < 1 && rect.height < 1;
+  const canFill =
+    !notLaidOut &&
+    !sidebarPaneIsStacked(body) &&
+    available >= 200 &&
+    view.innerHeight >= 200;
+  // A stacked reader section must keep a real height. Filling from rect.top
+  // writes 0 when the section is not the viewport yet, and overflow:hidden
+  // then clips the tab row.
+  applySidebarBoxHeight(
+    body,
+    shell,
+    canFill ? available : SIDEBAR_STACKED_MIN_HEIGHT,
+  );
 }
 
 function bindSidebarWheelTrap(shell: HTMLElement): void {
@@ -1605,8 +1684,9 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       width: 100%;
       max-width: 100%;
       min-width: 0;
-      height: 100%;
-      min-height: 0;
+      flex: 1 1 auto;
+      height: auto;
+      min-height: ${SIDEBAR_STACKED_MIN_HEIGHT}px;
       overflow: hidden;
       overscroll-behavior: contain;
       border: 1px solid rgba(255, 255, 255, 0.16);
@@ -1793,7 +1873,7 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       display: flex;
       flex-direction: column;
       flex: 1 1 auto;
-      min-height: 0;
+      min-height: 240px;
       width: 100%;
       max-width: 100%;
       overflow: hidden;
@@ -1808,8 +1888,9 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       display: none;
     }
 
-    .ai-butler-sidebar-tab-panel.is-active {
+    .ai-butler-sidebar-shell .ai-butler-sidebar-tab-panel.is-active {
       display: flex;
+      min-height: 240px;
     }
 
     .ai-butler-sidebar-job {
@@ -2044,6 +2125,8 @@ function applySidebarTabOverflow(
   moreWrap.style.display = "none";
 
   const fits = (): boolean => nav.scrollWidth <= nav.clientWidth + 1;
+  // A not-yet-laid-out section reports 0 width and would hide every tab.
+  if (nav.clientWidth < 48) return;
   if (fits()) return;
 
   moreWrap.style.display = "block";
