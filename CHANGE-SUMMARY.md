@@ -1,26 +1,27 @@
-# 5.0.0-beta.2-jalen.3
+# 5.0.0-beta.2-jalen.4
 
-Fork-only build. Sidebar and main Chat are pure black with white text. Agent stays.
+Fork-only build. Chat stays pure black (`#000`) with white (`#fff`) text. Subscripts and superscripts use the KaTeX 0.18 layout.
 
-## Why jalen.2 still looked gray
+## Why subscripts sat on the base
 
-- `.ai-butler-sidebar-shell` defaulted to a light blue-white gradient. The darker shell existed only inside `@media (prefers-color-scheme: dark)`. Zotero on macOS often stays light, so the pane chrome stayed gray around the chat.
-- Pref `markdownTheme=github` injects `#ffffff` / `#f6f8fa` for `.markdown-body`, code, and tables. Those rules share the item-pane document with Chat.
-- `renderItemPaneSection` kept the existing DOM whenever Quick Chat was already on screen. After an XPI upgrade that DOM could still be the old Full Chat card stacked above Quick Chat, so the new page-mode chat never replaced it.
+Chat, Summary, and Agent render math with KaTeX **0.18.1**. That HTML uses `katex-strut`, `katex-base`, and `katex-sizing` (for example `.katex-sizing.reset-size6.size3` at `font-size: .7em`).
+
+The stylesheet shipped in the add-on was still KaTeX **0.16.27**. It styles `.strut` and `.sizing`, which 0.18 no longer emits. The script `top` offset was present, but the script never shrank and the strut stayed `display: inline`, so `height` and `vertical-align` on it were ignored. Subscripts stayed full size and overlapped the base (`R_{BoN}`, `D_{KL,BoN}`, `e^{\alpha_{RL}/\beta_{RL}-1}`).
+
+Fonts were already the 0.18 files. KaTeX CSS was already injected. A parent `line-height` or `vertical-align` reset was not the cause, and this build does not add one.
 
 ## What changed
 
-- The sidebar shell, topbar, and tabs are `#000` / `#fff` with no light gradient and no `prefers-color-scheme` switch.
-- Chat messages, bubbles, code, tables, blockquote, and `.markdown-body` inside `#ai-butler-inline-chat` are forced to `#000` background and `#fff` text. `.katex` stays white on a transparent background.
-- The Chat tab only mounts `renderChatArea(..., { mode: "page" })`, with ↗ to open the main Chat tab. It does not render the Full Chat card.
-- A layout generation of `3` is stored on the shell. A re-render rebuilds the pane when that attribute is missing or when `.ai-butler-sidebar-chat-entry` is still in the DOM.
+- `addon/content/katex.min.css` is the 0.18.1 stylesheet that matches the renderer. Chat, Summary, and Agent all load this file.
+- Chat still forces `box-sizing: content-box` on `.katex` and keeps `.vlist-s` at 2px, so the chat’s `border-box` / `min-width: 0` rules do not shrink KaTeX’s script table. Those rules do not set `line-height` or `vertical-align` on `.katex` internals.
+- Sidebar layout generation is `4`, so an open pane replaces the inlined 0.16 CSS from jalen.3.
+- The black shell, black Chat bubbles, and page-mode Chat (no Full Chat card) are unchanged.
 
 ## Verify in Zotero
 
-1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.3.xpi` and restart Zotero. Select the same paper again if the old card is still visible once; the pane rebuilds when that card or a pre-v3 shell is present.
-2. Sidebar Chat should be black from the tabs through the composer. Text and formulas are white. There is no teal Full Chat card above the thread.
-3. Main Chat (↗ or the Chat tab) uses the same black thread.
+1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.4.xpi` and restart Zotero. Select the paper again if the pane was left open from jalen.3.
+2. In Chat, `R_{BoN}` and `\alpha_{BoN}` should show a smaller subscript below the baseline, and `e^{\alpha_{RL}/\beta_{RL}-1}` should show a raised exponent. The pane stays black with white text, and there is no Full Chat card.
 
 ## Prefs
 
-This build does not rewrite `markdownTheme` or `sidebarQuickChatHeight`. GitHub markdown colors are overridden inside Chat only. Page-mode Chat still ignores the 200px height pref.
+This build does not rewrite `markdownTheme` or `sidebarQuickChatHeight`.

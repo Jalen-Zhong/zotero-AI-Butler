@@ -914,7 +914,7 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 }
 
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
-const SIDEBAR_LAYOUT_GENERATION = "3";
+const SIDEBAR_LAYOUT_GENERATION = "4";
 
 function sidebarChromeIsCurrent(body: HTMLElement): boolean {
   if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
@@ -3798,11 +3798,13 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   overflow-x: hidden;
   contain: inline-size;
 }
+#ai-butler-inline-chat .ai-butler-quick-chat-assistant {
+  text-align: left;
+}
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant,
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant * {
   min-width: 0;
   max-width: 100%;
-  text-align: left;
   overflow-wrap: anywhere;
   word-break: break-word;
   white-space: normal;
@@ -3848,6 +3850,12 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   color: #fff !important;
   background: transparent !important;
   background-color: transparent !important;
+  /* Do not inherit the chat's border-box. KaTeX struts and scripts assume content-box. */
+  box-sizing: content-box;
+}
+#ai-butler-inline-chat .katex .vlist-s {
+  min-width: 2px;
+  width: 2px;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant p {
   margin: 0.35em 0;
