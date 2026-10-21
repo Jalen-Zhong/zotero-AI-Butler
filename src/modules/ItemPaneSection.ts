@@ -260,6 +260,7 @@ const sidebarWorkspaceResizeObservers = new WeakMap<
   ResizeObserver
 >();
 const sidebarWorkspaceMenuCleanups = new WeakMap<HTMLElement, () => void>();
+let sidebarSectionResizing = false;
 const SIDEBAR_SUMMARY_SELECTION_PREF = "sidebarSelectedSummaryBlockIds" as any;
 
 type SidebarTabId = "summary" | "chat" | "deepRead" | "mindmap" | "quickRead";
@@ -1036,10 +1037,13 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 }
 
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
-const SIDEBAR_LAYOUT_GENERATION = "11";
+const SIDEBAR_LAYOUT_GENERATION = "12";
 
-/** Stacked reader sections get this height. Never 0 — a 0px shell clips the tabs. */
+/** Drag floor. A shorter shell clips the tab row. */
 const SIDEBAR_STACKED_MIN_HEIGHT = 360;
+/** First-open height for a stacked reader section. Taller than the drag floor. */
+const SIDEBAR_STACKED_DEFAULT_HEIGHT = 640;
+const SIDEBAR_STACKED_MAX_HEIGHT = 2400;
 
 const renderedSidebarPanels = new WeakSet<HTMLElement>();
 
@@ -1422,6 +1426,7 @@ function renderItemPaneSection(
   nav.appendChild(refreshBtn);
   shell.appendChild(nav);
   shell.appendChild(content);
+  shell.appendChild(bindSidebarSectionResize(doc, body, shell));
 
   try {
     body.appendChild(shell);
@@ -1508,6 +1513,26 @@ function sidebarPaneIsStacked(body: HTMLElement): boolean {
   return false;
 }
 
+function clampSidebarSectionHeight(heightPx: number): number {
+  if (!Number.isFinite(heightPx)) return SIDEBAR_STACKED_DEFAULT_HEIGHT;
+  return Math.min(
+    SIDEBAR_STACKED_MAX_HEIGHT,
+    Math.max(SIDEBAR_STACKED_MIN_HEIGHT, Math.floor(heightPx)),
+  );
+}
+
+function readSidebarSectionHeight(): number {
+  try {
+    const raw = Number(getPref("sidebarSectionHeight"));
+    if (!Number.isFinite(raw) || raw < SIDEBAR_STACKED_MIN_HEIGHT) {
+      return SIDEBAR_STACKED_DEFAULT_HEIGHT;
+    }
+    return clampSidebarSectionHeight(raw);
+  } catch {
+    return SIDEBAR_STACKED_DEFAULT_HEIGHT;
+  }
+}
+
 function applySidebarBoxHeight(
   body: HTMLElement,
   shell: HTMLElement,
@@ -1525,6 +1550,83 @@ function applySidebarBoxHeight(
   shell.style.maxHeight = px;
 }
 
+function syncSidebarResizeHandle(shell: HTMLElement, visible: boolean): void {
+  const handle = shell.querySelector(
+    ".ai-butler-sidebar-resize",
+  ) as HTMLElement | null;
+  if (!handle) return;
+  handle.style.display = visible ? "flex" : "none";
+}
+
+function bindSidebarSectionResize(
+  doc: Document,
+  body: HTMLElement,
+  shell: HTMLElement,
+): HTMLElement {
+  const handle = doc.createElement("div");
+  handle.className = "ai-butler-sidebar-resize";
+  handle.title = getString("itempane-section-resize");
+  handle.setAttribute("role", "separator");
+  handle.setAttribute("aria-orientation", "horizontal");
+  const grip = doc.createElement("span");
+  grip.className = "ai-butler-sidebar-resize-grip";
+  grip.setAttribute("aria-hidden", "true");
+  handle.appendChild(grip);
+
+  let dragging = false;
+  let startY = 0;
+  let startHeight = 0;
+  const listenerTarget = doc.defaultView || doc;
+
+  const finish = (): void => {
+    if (!dragging) return;
+    dragging = false;
+    sidebarSectionResizing = false;
+    if (doc.body) doc.body.style.cursor = "";
+    const height = clampSidebarSectionHeight(
+      shell.getBoundingClientRect().height || startHeight,
+    );
+    setPref("sidebarSectionHeight", String(height));
+    applySidebarBoxHeight(body, shell, height);
+  };
+  const onMove = (event: Event): void => {
+    if (!dragging) return;
+    const mouse = event as MouseEvent;
+    mouse.preventDefault();
+    mouse.stopPropagation();
+    applySidebarBoxHeight(
+      body,
+      shell,
+      clampSidebarSectionHeight(startHeight + mouse.clientY - startY),
+    );
+  };
+  const onUp = (): void => finish();
+
+  handle.addEventListener("mousedown", (event: MouseEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragging = true;
+    sidebarSectionResizing = true;
+    startY = event.clientY;
+    startHeight =
+      shell.getBoundingClientRect().height || readSidebarSectionHeight();
+    if (doc.body) doc.body.style.cursor = "ns-resize";
+  });
+  listenerTarget.addEventListener("mousemove", onMove, true);
+  listenerTarget.addEventListener("mouseup", onUp, true);
+  const priorCleanup = sidebarWorkspaceMenuCleanups.get(body);
+  sidebarWorkspaceMenuCleanups.set(body, () => {
+    priorCleanup?.();
+    listenerTarget.removeEventListener("mousemove", onMove, true);
+    listenerTarget.removeEventListener("mouseup", onUp, true);
+    dragging = false;
+    sidebarSectionResizing = false;
+    if (doc.body) doc.body.style.cursor = "";
+  });
+  return handle;
+}
+
 function fitSidebarShellToViewport(
   body: HTMLElement,
   shell: HTMLElement,
@@ -1533,7 +1635,7 @@ function fitSidebarShellToViewport(
   if (!doc) return;
   const view = doc.defaultView;
   if (!view) {
-    applySidebarBoxHeight(body, shell, SIDEBAR_STACKED_MIN_HEIGHT);
+    applySidebarBoxHeight(body, shell, readSidebarSectionHeight());
     return;
   }
 
@@ -1543,19 +1645,21 @@ function fitSidebarShellToViewport(
   const available = Math.floor(
     view.innerHeight - Math.max(0, rect.top) - bottomInset,
   );
+  if (sidebarSectionResizing) return;
   const notLaidOut = rect.width < 1 && rect.height < 1;
   const canFill =
     !notLaidOut &&
     !sidebarPaneIsStacked(body) &&
     available >= 200 &&
     view.innerHeight >= 200;
-  // A stacked reader section must keep a real height. Filling from rect.top
+  // A stacked reader section keeps the saved height. Filling from rect.top
   // writes 0 when the section is not the viewport yet, and overflow:hidden
   // then clips the tab row.
+  syncSidebarResizeHandle(shell, !canFill);
   applySidebarBoxHeight(
     body,
     shell,
-    canFill ? available : SIDEBAR_STACKED_MIN_HEIGHT,
+    canFill ? available : readSidebarSectionHeight(),
   );
 }
 
@@ -1627,6 +1731,7 @@ function canElementScrollVertically(
 }
 
 function cleanupSidebarWorkspace(body: HTMLElement): void {
+  sidebarSectionResizing = false;
   const previousObserver = sidebarWorkspaceResizeObservers.get(body);
   if (previousObserver) {
     previousObserver.disconnect();
@@ -2064,6 +2169,27 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       color: var(--ai-butler-muted);
       font-size: 11px;
       line-height: 1.35;
+    }
+
+    .ai-butler-sidebar-resize {
+      flex: 0 0 auto;
+      height: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: ns-resize;
+      background: #000;
+      color: #fff;
+      border-top: 1px solid rgba(255, 255, 255, 0.28);
+      user-select: none;
+      touch-action: none;
+    }
+
+    .ai-butler-sidebar-resize-grip {
+      width: 42px;
+      height: 3px;
+      border-radius: 999px;
+      background: #fff;
     }
 
     .ai-butler-sidebar-empty {

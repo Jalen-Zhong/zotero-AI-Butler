@@ -246,6 +246,7 @@ function initializeDefaultPrefs() {
     sidebarModuleVisibility: DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF,
     sidebarModuleOrder: DEFAULT_SIDEBAR_MODULE_ORDER_PREF,
     sidebarActiveTab: "chat",
+    sidebarSectionHeight: "640",
     noteExportEnabled: false,
     noteExportRootPath: "",
     noteExportWatchedCollections: "[]",

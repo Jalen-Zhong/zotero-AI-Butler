@@ -296,6 +296,7 @@ function initializeDefaultPrefsOnStartup() {
     sidebarModuleVisibility: DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF,
     sidebarModuleOrder: DEFAULT_SIDEBAR_MODULE_ORDER_PREF,
     sidebarActiveTab: "chat",
+    sidebarSectionHeight: "640",
     openTaskPanelOnSummon: false,
     autoScanSummaryEnabled: true,
     autoScanDeepReadEnabled: false,

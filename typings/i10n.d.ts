@@ -658,6 +658,7 @@ export type FluentMessageId =
   | 'itempane-save-note'
   | 'itempane-saved'
   | 'itempane-saving'
+  | 'itempane-section-resize'
   | 'itempane-send'
   | 'itempane-send-failed'
   | 'itempane-sidebar-job-progress'

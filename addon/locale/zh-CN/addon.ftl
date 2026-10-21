@@ -27,6 +27,7 @@ itempane-tab-mindmap = 思维导图
 itempane-tab-quick-read = 快读
 itempane-no-enabled-tabs = 当前没有启用的 AI 管家侧边栏标签
 itempane-refresh-tooltip = 重新渲染 AI 管家侧边栏
+itempane-section-resize = 拖动调整 AI 管家高度
 itempane-table-title = 表格归纳
 itempane-table-badge-filled = 已填表
 itempane-table-badge-reviewed = 已综述

@@ -27,6 +27,7 @@ itempane-tab-mindmap = Mind Map
 itempane-tab-quick-read = Quick Read
 itempane-no-enabled-tabs = No AI Butler sidebar tabs are enabled
 itempane-refresh-tooltip = Refresh AI Butler sidebar
+itempane-section-resize = Drag to resize AI Butler
 itempane-table-title = Table Summary
 itempane-table-badge-filled = Table filled
 itempane-table-badge-reviewed = Reviewed
