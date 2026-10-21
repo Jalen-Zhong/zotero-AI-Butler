@@ -799,11 +799,35 @@ async function ensureSidebarAutoRefresh(): Promise<void> {
     const { TaskQueueManager } = await import("./taskQueue");
     const manager = TaskQueueManager.getInstance();
 
+    manager.onProgress((taskId, progress, message) => {
+      sidebarJobMessages.set(taskId, message);
+      const parsed = parseTaskTarget(taskId);
+      if (!parsed || !isSidebarJobTarget(parsed.target)) return;
+      if (!sidebarContextItemIds().includes(parsed.itemId)) return;
+      paintSidebarJobProgress(parsed.target, progress, message);
+    });
+
     manager.onComplete((taskId, success) => {
-      if (!success) return;
       const parsed = parseTaskTarget(taskId);
       if (!parsed) return;
-      if (!sidebarContext || sidebarContext.itemId !== parsed.itemId) return;
+      if (
+        sidebarContextItemIds().includes(parsed.itemId) &&
+        isSidebarJobTarget(parsed.target)
+      ) {
+        if (success) {
+          sidebarJobMessages.delete(taskId);
+          void refreshSidebarJobProgress();
+        } else {
+          paintSidebarJobProgress(
+            parsed.target,
+            0,
+            getString("itempane-failed"),
+            true,
+          );
+        }
+      }
+      if (!success) return;
+      if (!sidebarContextItemIds().includes(parsed.itemId)) return;
       scheduleSidebarRefresh(parsed.target);
     });
   } catch (error) {
@@ -944,7 +968,7 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 }
 
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
-const SIDEBAR_LAYOUT_GENERATION = "5";
+const SIDEBAR_LAYOUT_GENERATION = "6";
 
 function sidebarChromeIsCurrent(body: HTMLElement): boolean {
   if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
@@ -1267,7 +1291,9 @@ function renderItemPaneSection(
 
   nav.appendChild(refreshBtn);
   shell.appendChild(nav);
+  shell.appendChild(createSidebarJobProgress(doc));
   shell.appendChild(content);
+  void refreshSidebarJobProgress();
   body.appendChild(shell);
   bindSidebarWheelTrap(shell);
 
@@ -1631,6 +1657,39 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       scrollbar-width: thin;
       background: #000;
       color: #fff;
+    }
+
+    .ai-butler-sidebar-job {
+      display: none;
+      flex: 0 0 auto;
+      padding: 8px 10px 6px;
+      background: #000;
+      color: #fff;
+    }
+
+    .ai-butler-sidebar-job.is-active {
+      display: block;
+    }
+
+    .ai-butler-sidebar-job-label {
+      margin: 0 0 4px;
+      color: #fff;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .ai-butler-sidebar-job-track {
+      height: 6px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    .ai-butler-sidebar-job-fill {
+      height: 100%;
+      width: 0;
+      border-radius: 999px;
+      background: #fff;
     }
 
     .ai-butler-sidebar-tab-panel {
@@ -2113,6 +2172,187 @@ async function resolveSidebarParentItem(
   return item;
 }
 
+type SidebarJobKind = "summary" | "deepRead" | "mindmap";
+
+const sidebarJobMessages = new Map<string, string>();
+
+function isSidebarJobTarget(
+  target: SidebarAutoRefreshTarget,
+): target is SidebarJobKind {
+  return target === "summary" || target === "deepRead" || target === "mindmap";
+}
+
+function sidebarJobKindFromTask(task: {
+  taskType?: string;
+}): SidebarJobKind | null {
+  const type = task.taskType || "summary";
+  if (type === "summary" || type === "deepRead" || type === "mindmap") {
+    return type;
+  }
+  return null;
+}
+
+function sidebarJobLabel(kind: SidebarJobKind): string {
+  if (kind === "deepRead") return getString("itempane-tab-deep-read");
+  if (kind === "mindmap") return getString("itempane-tab-mindmap");
+  return getString("itempane-tab-summary");
+}
+
+function sidebarContextItemIds(): number[] {
+  if (!sidebarContext) return [];
+  const ids = [sidebarContext.itemId];
+  const parentId = sidebarContext.item.parentItemID;
+  if (typeof parentId === "number" && parentId > 0 && !ids.includes(parentId)) {
+    ids.push(parentId);
+  }
+  return ids;
+}
+
+function paintSidebarJobProgress(
+  kind: SidebarJobKind | null,
+  progress: number,
+  message: string,
+  failed = false,
+): void {
+  const host = sidebarContext?.doc.getElementById("ai-butler-sidebar-job");
+  if (!host) return;
+  const label = host.querySelector(
+    ".ai-butler-sidebar-job-label",
+  ) as HTMLElement | null;
+  const fill = host.querySelector(
+    ".ai-butler-sidebar-job-fill",
+  ) as HTMLElement | null;
+  if (!kind) {
+    host.classList.remove("is-active");
+    return;
+  }
+  host.classList.add("is-active");
+  const clamped = Math.max(0, Math.min(100, Math.round(progress)));
+  if (label) {
+    label.textContent = getString("itempane-sidebar-job-progress", {
+      args: {
+        kind: sidebarJobLabel(kind),
+        message: message || getString("itempane-sidebar-job-queued"),
+      },
+    });
+  }
+  if (fill) {
+    fill.style.width = `${clamped}%`;
+    fill.style.background = failed ? "#e57373" : "#fff";
+  }
+  host.setAttribute("aria-valuenow", String(clamped));
+}
+
+function createSidebarJobProgress(doc: Document): HTMLElement {
+  const host = doc.createElement("div");
+  host.id = "ai-butler-sidebar-job";
+  host.className = "ai-butler-sidebar-job";
+  host.setAttribute("role", "progressbar");
+  host.setAttribute("aria-valuemin", "0");
+  host.setAttribute("aria-valuemax", "100");
+  host.setAttribute("aria-valuenow", "0");
+  const label = doc.createElement("div");
+  label.className = "ai-butler-sidebar-job-label";
+  const track = doc.createElement("div");
+  track.className = "ai-butler-sidebar-job-track";
+  const fill = doc.createElement("div");
+  fill.className = "ai-butler-sidebar-job-fill";
+  track.appendChild(fill);
+  host.appendChild(label);
+  host.appendChild(track);
+  return host;
+}
+
+async function refreshSidebarJobProgress(): Promise<void> {
+  const ids = sidebarContextItemIds();
+  if (!ids.length) {
+    paintSidebarJobProgress(null, 0, "");
+    return;
+  }
+  const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
+  const active = TaskQueueManager.getInstance()
+    .getAllTasks()
+    .filter((task) => {
+      const kind = sidebarJobKindFromTask(task);
+      return (
+        !!kind &&
+        ids.includes(task.itemId) &&
+        (task.status === TaskStatus.PENDING ||
+          task.status === TaskStatus.PRIORITY ||
+          task.status === TaskStatus.PROCESSING)
+      );
+    });
+  const current =
+    active.find((task) => task.status === TaskStatus.PROCESSING) || active[0];
+  if (!current) {
+    paintSidebarJobProgress(null, 0, "");
+    return;
+  }
+  const kind = sidebarJobKindFromTask(current);
+  if (!kind) return;
+  paintSidebarJobProgress(
+    kind,
+    current.progress || 0,
+    sidebarJobMessages.get(current.id) || current.workflowStage || "",
+  );
+}
+
+async function enqueueSidebarJob(
+  doc: Document,
+  button: HTMLButtonElement,
+  item: Zotero.Item,
+  kind: SidebarJobKind,
+): Promise<void> {
+  const target = await resolveSidebarParentItem(item);
+  const { TaskArtifacts } = await import("./taskArtifacts");
+  const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
+  const queue = TaskQueueManager.getInstance();
+  const running = queue.getAllTasks().find((task) => {
+    return (
+      task.itemId === target.id &&
+      sidebarJobKindFromTask(task) === kind &&
+      (task.status === TaskStatus.PENDING ||
+        task.status === TaskStatus.PRIORITY ||
+        task.status === TaskStatus.PROCESSING)
+    );
+  });
+  if (running) {
+    paintSidebarJobProgress(
+      kind,
+      running.progress || 0,
+      sidebarJobMessages.get(running.id) ||
+        running.workflowStage ||
+        getString("itempane-sidebar-job-queued"),
+    );
+    return;
+  }
+
+  const probe = await TaskArtifacts.probe(kind, target);
+  if (probe.exists) {
+    const confirmed = Services.prompt.confirm(
+      (doc.defaultView || Zotero.getMainWindow()) as any,
+      getString("itempane-regenerate-confirm-title"),
+      getString("itempane-regenerate-confirm-message", {
+        args: { kind: sidebarJobLabel(kind) },
+      }),
+    );
+    if (!confirmed) return;
+  }
+
+  button.disabled = true;
+  button.textContent = getString("itempane-adding-to-queue");
+  const options = probe.exists ? { forceOverwrite: true } : undefined;
+  if (kind === "deepRead") {
+    await queue.addDeepReadTask(target, true, options);
+  } else if (kind === "mindmap") {
+    await queue.addMindmapTask(target, true, options);
+  } else {
+    await queue.addTask(target, true, options);
+  }
+  paintSidebarJobProgress(kind, 0, getString("itempane-sidebar-job-queued"));
+  button.textContent = getString("itempane-added-to-queue");
+}
+
 function sidebarGenerateLabel(noteKind: AiNoteKind): string {
   return noteKind === "deepRead"
     ? getString("itempane-generate-deep-read")
@@ -2146,17 +2386,12 @@ function createSidebarGenerateButton(
     event.stopPropagation();
     const idleLabel = sidebarGenerateLabel(noteKind);
     try {
-      button.disabled = true;
-      button.textContent = getString("itempane-adding-to-queue");
-      const target = await resolveSidebarParentItem(item);
-      const { TaskQueueManager } = await import("./taskQueue");
-      const queue = TaskQueueManager.getInstance();
-      if (noteKind === "deepRead") {
-        await queue.addDeepReadTask(target, true);
-      } else {
-        await queue.addTask(target, true);
-      }
-      button.textContent = getString("itempane-added-to-queue");
+      await enqueueSidebarJob(
+        doc,
+        button,
+        item,
+        noteKind === "deepRead" ? "deepRead" : "summary",
+      );
     } catch {
       button.textContent = getString("itempane-failed");
       setTimeout(() => {
@@ -3391,7 +3626,38 @@ function renderMindmapSection(
     transition: transform 0.2s ease;
   `;
 
+  const mindmapGenerateBtn = doc.createElement("button");
+  mindmapGenerateBtn.type = "button";
+  mindmapGenerateBtn.textContent = getString("itempane-generate-mindmap");
+  mindmapGenerateBtn.style.cssText = `
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    border-radius: 4px;
+    background: #000;
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+  `;
+  mindmapGenerateBtn.addEventListener("click", async (event: Event) => {
+    event.stopPropagation();
+    const idleLabel = getString("itempane-generate-mindmap");
+    try {
+      await enqueueSidebarJob(doc, mindmapGenerateBtn, item, "mindmap");
+    } catch {
+      mindmapGenerateBtn.textContent = getString("itempane-failed");
+      setTimeout(() => {
+        mindmapGenerateBtn.textContent = idleLabel;
+        mindmapGenerateBtn.disabled = false;
+      }, 2000);
+    }
+  });
+
   mindmapHeader.appendChild(mindmapTitle);
+  mindmapHeader.appendChild(mindmapGenerateBtn);
   mindmapHeader.appendChild(mindmapToggleIcon);
 
   // 思维导图容器
@@ -3545,21 +3811,18 @@ async function loadMindmapContent(
         generateMindmapBtn.style.background = "transparent";
       });
       generateMindmapBtn.addEventListener("click", async () => {
+        const idleLabel = getString("itempane-generate-mindmap");
         try {
-          generateMindmapBtn.disabled = true;
-          generateMindmapBtn.textContent = getString(
-            "itempane-adding-to-queue",
+          await enqueueSidebarJob(
+            doc,
+            generateMindmapBtn,
+            targetItem,
+            "mindmap",
           );
-          const { TaskQueueManager } = await import("./taskQueue");
-          const queueManager = TaskQueueManager.getInstance();
-          await queueManager.addMindmapTask(targetItem);
-          generateMindmapBtn.textContent = getString("itempane-added-to-queue");
-        } catch (err: any) {
+        } catch {
           generateMindmapBtn.textContent = getString("itempane-failed");
           setTimeout(() => {
-            generateMindmapBtn.textContent = getString(
-              "itempane-generate-mindmap",
-            );
+            generateMindmapBtn.textContent = idleLabel;
             generateMindmapBtn.disabled = false;
           }, 2000);
         }

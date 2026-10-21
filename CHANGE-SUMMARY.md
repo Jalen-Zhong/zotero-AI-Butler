@@ -1,21 +1,20 @@
-# 5.0.0-beta.2-jalen.5
+# 5.0.0-beta.2-jalen.6
 
-Fork-only build. Summary, Chat, Deep Read, and Mind Map live on the item sidebar. The main window no longer uses AI Summary or Chat as the paper viewer.
+Fork-only build. Sidebar Generate shows the selected paper’s task progress, and asks before replacing a finished result.
 
 ## What changed
 
-- The main window tab bar no longer has AI Summary or Chat. Dashboard, Agent, Task Queue, and Settings stay. Opening those old tabs lands on the dashboard instead of the paper viewer. Task-queue details no longer switches to the Summary view.
-- The item sidebar tabs are Summary, Chat, Deep Read, and Mind Map. Chat is still the full-height page-mode thread (new, cache, delete). There is no separate Chat window button and no Full Chat card.
-- Summary and Deep Read each have a Generate button for the selected paper, using the same queue path as Mind Map (`addTask` / `addDeepReadTask`, priority for that one item).
-- The default sidebar map shows the summary note. A profile that still has the exact previous fork map (summary hidden, table and image summary hidden) is updated so Summary appears. Any other saved map is left alone.
-- Chat stays `#000` / `#fff`. Summary and Deep Read use the same black shell with white text. KaTeX is still the 0.18 stylesheet, and the sidebar note rules do not reset `line-height` or `vertical-align` inside `.katex`.
+- Summary, Deep Read, and Mind Map subscribe to the existing task-queue progress and completion callbacks. A bar under the sidebar tabs shows that paper’s running job (queued, in progress, or failed). It is not only in the Task Queue.
+- If that feature already has a completed result, Generate asks before replacing it. Cancel leaves the note alone. An empty or failed result starts without the question. A confirmed replace passes `forceOverwrite` through the same queue used by Mind Map, so a finished task is not skipped.
+- Mind Map keeps Generate in the section header, including when a map is already there.
+- Chat stays page-mode on black (`#000`) / white (`#fff`). Summary and Deep Read stay on that shell. KaTeX is still the 0.18 stylesheet. The main window still has no Summary or Chat tabs.
 
 ## Verify in Zotero
 
-1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.5.xpi` and restart Zotero.
-2. The 🤖 window should not show AI Summary or Chat tabs. Select a paper and use the sidebar: Summary, Chat, Deep Read, Mind Map.
-3. Generate on Summary or Deep Read queues that paper only. Chat stays black, and subscripts still sit below the baseline.
+1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.6.xpi` and restart Zotero.
+2. Select a paper with no summary. Generate should start immediately and show a progress bar in the sidebar.
+3. When a summary, deep read, or mind map already exists, Generate should ask first. Cancel does nothing. Confirm runs again and the bar tracks that job.
 
 ## Prefs
 
-Table summary and one-image summary stay off. `sidebarQuickChatHeight` is not rewritten. Page-mode Chat still ignores that height pref.
+This build does not rewrite `noteStrategy`. The confirm step is the overwrite choice for that one paper.
