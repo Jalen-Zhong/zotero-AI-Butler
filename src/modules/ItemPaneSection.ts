@@ -1000,6 +1000,8 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
 const SIDEBAR_LAYOUT_GENERATION = "8";
 
+const renderedSidebarPanels = new WeakSet<HTMLElement>();
+
 function sidebarChromeIsCurrent(body: HTMLElement): boolean {
   if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
   const shell = body.querySelector(".ai-butler-sidebar-shell");
@@ -1019,6 +1021,46 @@ function persistActiveQuickChatThread(): void {
     }
   } catch (err) {
     ztoolkit.log("[AI-Butler] ChatPersist save failed:", err);
+  }
+}
+
+function scheduleEnsureSidebarNotesLoaded(): void {
+  const itemId = sidebarRenderContext?.itemId;
+  const view = sidebarRenderContext?.body.ownerDocument?.defaultView;
+  const run = (): void => {
+    if (!sidebarRenderContext || sidebarRenderContext.itemId !== itemId) return;
+    void ensureSidebarNotesLoaded();
+  };
+  if (view) view.setTimeout(run, 0);
+  else setTimeout(run, 0);
+}
+
+async function ensureSidebarNotesLoaded(): Promise<void> {
+  const ctx = sidebarRenderContext;
+  if (!ctx?.item.isRegularItem()) return;
+  const { body, item, handleOpenAIChat } = ctx;
+  const doc = body.ownerDocument;
+  if (!doc) return;
+
+  for (const kind of ["summary", "deepRead"] as const) {
+    if (sidebarRenderContext?.itemId !== item.id) return;
+    const panel = body.querySelector(
+      `.ai-butler-sidebar-tab-panel[data-tab-id="${kind}"]`,
+    ) as HTMLElement | null;
+    if (!panel) continue;
+    const noteContent = panel.querySelector(
+      `#${getSidebarNoteElementId("ai-butler-note-content", kind)}`,
+    ) as HTMLElement | null;
+    if (!noteContent) {
+      panel.replaceChildren();
+      renderSidebarTabPanel(kind, panel, doc, item, handleOpenAIChat);
+      continue;
+    }
+    const text = noteContent.textContent || "";
+    if (text.includes(getString("itempane-status-refreshing"))) continue;
+    if (noteContent.childElementCount > 0 || text.trim()) continue;
+    noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    await loadNoteContent(doc, item, noteContent, kind);
   }
 }
 
@@ -1061,6 +1103,7 @@ function renderItemPaneSection(
       itemId: item.id,
       handleOpenAIChat,
     };
+    scheduleEnsureSidebarNotesLoaded();
     return;
   }
 
@@ -1223,8 +1266,19 @@ function renderItemPaneSection(
     ? storedTab
     : tabs[0].id;
 
+  const renderedTabs = new Set<SidebarTabId>();
+  const renderTab = (tabId: SidebarTabId): void => {
+    if (renderedTabs.has(tabId)) return;
+    const panel = panels.get(tabId);
+    if (!panel) return;
+    if (sidebarRenderContext?.itemId !== item.id) return;
+    renderedTabs.add(tabId);
+    renderSidebarTabPanel(tabId, panel, doc, item, handleOpenAIChat);
+  };
+
   const activateTab = (tabId: SidebarTabId): void => {
     if (!panels.has(tabId)) return;
+    renderTab(tabId);
     activeTab = tabId;
     sidebarActiveTabId = activeTab;
     setPref("sidebarActiveTab", activeTab);
@@ -1320,17 +1374,37 @@ function renderItemPaneSection(
     panel.setAttribute("aria-hidden", tab.id === activeTab ? "false" : "true");
     panels.set(tab.id, panel);
     content.appendChild(panel);
-    renderSidebarTabPanel(tab.id, panel, doc, item, handleOpenAIChat);
   }
 
   nav.appendChild(refreshBtn);
   shell.appendChild(nav);
   shell.appendChild(content);
-  void refreshSidebarJobProgress();
   body.appendChild(shell);
   bindSidebarWheelTrap(shell);
 
-  activateTab(activeTab);
+  const revealSidebar = (): void => {
+    if (!shell.isConnected || sidebarRenderContext?.itemId !== item.id) return;
+    activateTab(activeTab);
+    const noteTabsToWarm = (["summary", "deepRead"] as const).filter(
+      (tabId) => panels.has(tabId) && !renderedTabs.has(tabId),
+    );
+    const warmSidebarNoteTab = (index: number): void => {
+      if (!shell.isConnected || sidebarRenderContext?.itemId !== item.id) {
+        return;
+      }
+      const tabId = noteTabsToWarm[index];
+      if (!tabId) return;
+      renderTab(tabId);
+      if (index + 1 < noteTabsToWarm.length) {
+        doc.defaultView?.setTimeout(() => warmSidebarNoteTab(index + 1), 0);
+      }
+    };
+    if (noteTabsToWarm.length) {
+      doc.defaultView?.setTimeout(() => warmSidebarNoteTab(0), 0);
+    }
+  };
+  if (doc.defaultView) doc.defaultView.setTimeout(revealSidebar, 0);
+  else setTimeout(revealSidebar, 0);
 
   const ResizeObserverCtor = doc.defaultView?.ResizeObserver;
   if (ResizeObserverCtor) {
@@ -1981,6 +2055,8 @@ function renderSidebarTabPanel(
   item: Zotero.Item,
   _handleOpenAIChat: (itemId: number) => Promise<void>,
 ): void {
+  if (renderedSidebarPanels.has(panel)) return;
+  renderedSidebarPanels.add(panel);
   switch (tabId) {
     case "summary":
       renderNoteSection(panel, doc, item, "summary", { mode: "page" });
@@ -2005,6 +2081,15 @@ function renderSidebarTabPanel(
         panel.appendChild(hint);
       }
       break;
+  }
+  if (tabId === "summary" || tabId === "deepRead" || tabId === "mindmap") {
+    const itemId = item.id;
+    const refresh = (): void => {
+      if (sidebarRenderContext?.itemId !== itemId) return;
+      void refreshSidebarJobProgress();
+    };
+    if (doc.defaultView) doc.defaultView.setTimeout(refresh, 0);
+    else setTimeout(refresh, 0);
   }
 }
 
@@ -3831,6 +3916,12 @@ async function loadMindmapContent(
     sidebarContentLoadIsCurrent(loadKey, loadSerial) &&
     container.isConnected !== false;
   try {
+    await new Promise<void>((resolve) => {
+      const view = doc.defaultView;
+      if (view) view.setTimeout(resolve, 0);
+      else setTimeout(resolve, 0);
+    });
+    if (!mindmapWriteIsCurrent()) return;
     // Avoid accumulating message listeners across re-renders/refreshes
     const mindmapWin: any = doc.defaultView;
     if (mindmapWin?.__aiButlerMindmapMessageHandler) {
@@ -4761,6 +4852,7 @@ function renderChatArea(
   `;
 
   let quickChatBindGeneration = 0;
+  let persistedRenderGeneration = 0;
 
   const syncQuickChatThreadControls = (): void => {
     const busy = currentChatState.isChatting;
@@ -4774,7 +4866,18 @@ function renderChatArea(
   const renderPersistedMessages = (
     messages: Array<{ role: string; content: string }>,
   ): void => {
-    if (!messagesArea.isConnected || currentChatState.itemId !== item.id) {
+    const renderGeneration = ++persistedRenderGeneration;
+    const bindGeneration = quickChatBindGeneration;
+    const requestItemId = item.id;
+    const stillCurrent = (): boolean =>
+      renderGeneration === persistedRenderGeneration &&
+      bindGeneration === quickChatBindGeneration &&
+      messagesArea.isConnected &&
+      currentChatState.itemId === requestItemId;
+    if (
+      !messagesArea.isConnected ||
+      currentChatState.itemId !== requestItemId
+    ) {
       return;
     }
     messagesArea.innerHTML = "";
@@ -4783,6 +4886,8 @@ function renderChatArea(
       messagesArea.innerHTML = `<div style="color: #fff; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-thread-empty"))}</div>`;
       return;
     }
+    const pairs: Array<{ question: string; answer: string; marker: number }> =
+      [];
     let index = 0;
     while (index < list.length) {
       const message = list[index];
@@ -4798,10 +4903,17 @@ function renderChatArea(
       } else {
         index += 1;
       }
-      const pairWrapper = doc.createElement("div");
-      pairWrapper.className = "ai-butler-quick-chat-pair";
-      pairWrapper.setAttribute("data-pair-id", `restored_${index}`);
-      pairWrapper.style.cssText = `
+      pairs.push({ question, answer, marker: index });
+    }
+    const paintPairs = (start: number): void => {
+      if (!stillCurrent()) return;
+      const end = Math.min(start + 2, pairs.length);
+      for (let pairIndex = start; pairIndex < end; pairIndex += 1) {
+        const pair = pairs[pairIndex];
+        const pairWrapper = doc.createElement("div");
+        pairWrapper.className = "ai-butler-quick-chat-pair";
+        pairWrapper.setAttribute("data-pair-id", `restored_${pair.marker}`);
+        pairWrapper.style.cssText = `
         width: 100%;
         max-width: 100%;
         min-width: 0;
@@ -4814,9 +4926,9 @@ function renderChatArea(
         user-select: text;
         cursor: text;
       `;
-      const userMsgDiv = doc.createElement("div");
-      userMsgDiv.className = "ai-butler-quick-chat-user";
-      userMsgDiv.style.cssText = `
+        const userMsgDiv = doc.createElement("div");
+        userMsgDiv.className = "ai-butler-quick-chat-user";
+        userMsgDiv.style.cssText = `
         margin-bottom: 8px;
         padding: 8px;
         background: #000;
@@ -4827,12 +4939,12 @@ function renderChatArea(
         overflow-wrap: anywhere;
         word-break: break-word;
       `;
-      userMsgDiv.innerHTML = `<strong>${getString("itempane-user-label")}</strong> ${escapeHtmlForChat(question)}`;
-      pairWrapper.appendChild(userMsgDiv);
-      if (answer) {
-        const aiMsgDiv = doc.createElement("div");
-        aiMsgDiv.className = "ai-butler-quick-chat-assistant";
-        aiMsgDiv.style.cssText = `
+        userMsgDiv.innerHTML = `<strong>${getString("itempane-user-label")}</strong> ${escapeHtmlForChat(pair.question)}`;
+        pairWrapper.appendChild(userMsgDiv);
+        if (pair.answer) {
+          const aiMsgDiv = doc.createElement("div");
+          aiMsgDiv.className = "ai-butler-quick-chat-assistant";
+          aiMsgDiv.style.cssText = `
           margin-bottom: 8px;
           padding: 8px;
           background: #000;
@@ -4845,12 +4957,20 @@ function renderChatArea(
           overflow-x: hidden;
           user-select: text;
         `;
-        updateQuickChatAssistantMessage(aiMsgDiv, answer);
-        pairWrapper.appendChild(aiMsgDiv);
+          updateQuickChatAssistantMessage(aiMsgDiv, pair.answer);
+          pairWrapper.appendChild(aiMsgDiv);
+        }
+        messagesArea.appendChild(pairWrapper);
       }
-      messagesArea.appendChild(pairWrapper);
-    }
-    messagesArea.scrollTop = messagesArea.scrollHeight;
+      if (end < pairs.length) {
+        const view = doc.defaultView;
+        if (view) view.setTimeout(() => paintPairs(end), 0);
+        else setTimeout(() => paintPairs(end), 0);
+        return;
+      }
+      messagesArea.scrollTop = messagesArea.scrollHeight;
+    };
+    paintPairs(0);
   };
 
   const refreshThreadSelect = (): void => {
@@ -5682,7 +5802,11 @@ function renderChatArea(
   syncQuickChatThreadControls();
 
   if (initiallyVisible) {
-    void loadPdfContentIfNeeded();
+    const startPdfLoad = (): void => {
+      void loadPdfContentIfNeeded();
+    };
+    if (doc.defaultView) doc.defaultView.setTimeout(startPdfLoad, 0);
+    else setTimeout(startPdfLoad, 0);
   }
 
   // 发送消息处理 - 快速追问（上下文为论文 + 当前对话框内历史）
@@ -7106,6 +7230,14 @@ async function loadNoteContent(
     sidebarContentLoadIsCurrent(loadKey, loadSerial) &&
     noteContent.isConnected !== false;
   try {
+    if (!sidebarContentLoadIsCurrent(loadKey, loadSerial)) return;
+    if (noteContent.isConnected === false) {
+      await new Promise<void>((resolve) => {
+        const view = noteContent.ownerDocument?.defaultView;
+        if (view) view.setTimeout(resolve, 0);
+        else setTimeout(resolve, 0);
+      });
+    }
     if (!noteWriteIsCurrent()) return;
     if (isSidebarNoteEditing(item.id)) {
       setSidebarNoteEditStatus(
@@ -7118,6 +7250,7 @@ async function loadNoteContent(
     }
 
     resetSidebarNoteContentEditMode(noteContent);
+    noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
     let aiNoteContent = "";
     const resolvedNote = await resolveSidebarSummaryNote(item, noteKind);
 
@@ -7145,12 +7278,15 @@ async function loadNoteContent(
     const guardedNoteHtml = addZoteroNoteOverflowGuards(rawNoteHtml);
     if (guardedNoteHtml !== rawNoteHtml) {
       rawNoteHtml = guardedNoteHtml;
-      try {
-        (resolvedNote.note as any).setNote?.(guardedNoteHtml);
-        await (resolvedNote.note as any).saveTx?.();
-      } catch (error) {
-        ztoolkit.log("[AI-Butler] 修复 AI 笔记溢出样式失败:", error);
-      }
+      const noteToSave = resolvedNote.note;
+      void (async () => {
+        try {
+          (noteToSave as any).setNote?.(guardedNoteHtml);
+          await (noteToSave as any).saveTx?.();
+        } catch (error) {
+          ztoolkit.log("[AI-Butler] 修复 AI 笔记溢出样式失败:", error);
+        }
+      })();
     }
     const summaryBlocks = getDisplaySummaryBlocks(
       LLMNoteMetadataService.parseSummaryBlocks(rawNoteHtml),
@@ -7349,6 +7485,13 @@ async function loadNoteContent(
       doc,
       aiNoteContent,
     );
+
+    await new Promise<void>((resolve) => {
+      const view = doc.defaultView;
+      if (view) view.setTimeout(resolve, 0);
+      else setTimeout(resolve, 0);
+    });
+    if (!noteWriteIsCurrent()) return;
 
     // Same KaTeX path as Chat, before the note HTML is checked as XHTML.
     const latexRenderedContent = renderZoteroNoteDisplayHtml(
