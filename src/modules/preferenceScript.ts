@@ -16,6 +16,7 @@ import {
   DEFAULT_CONTEXT_MENU_ITEM_VISIBILITY_PREF,
   DEFAULT_SIDEBAR_MODULE_ORDER_PREF,
   DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF,
+  migrateForkSidebarSummaryVisibility,
 } from "./uiCustomization";
 
 export async function registerPrefsScripts(_window: Window) {
@@ -219,6 +220,7 @@ function bindPrefEvents(win: Window) {
  * 确保即使 prefs.js 没有加载，也能有默认值
  */
 function initializeDefaultPrefs() {
+  migrateForkSidebarSummaryVisibility();
   const defaults: Record<string, any> = {
     openaiApiKey: "",
     openaiApiUrl: "https://api.openai.com/v1/responses",
@@ -244,6 +246,7 @@ function initializeDefaultPrefs() {
     sidebarModuleVisibility: DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF,
     sidebarModuleOrder: DEFAULT_SIDEBAR_MODULE_ORDER_PREF,
     sidebarActiveTab: "chat",
+    sidebarSectionHeight: "640",
     noteExportEnabled: false,
     noteExportRootPath: "",
     noteExportWatchedCollections: "[]",

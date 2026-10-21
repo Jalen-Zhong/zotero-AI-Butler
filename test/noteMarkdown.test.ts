@@ -4,6 +4,7 @@ import {
   decodeMathHtmlEntities,
   markdownToDisplayHtml,
   markdownToZoteroNoteHtml,
+  renderZoteroNoteDisplayHtml,
   normalizeLatexForKatex,
   requiresDisplayMath,
   stripMathDelimiters,
@@ -12,6 +13,10 @@ import {
   removeFollowUpChatPairFromNoteHtml,
 } from "../src/modules/noteMarkdown";
 import { buildQuickChatConversation } from "../src/modules/chatContext";
+import {
+  normalizeQuickChatXhtml,
+  sanitizeQuickChatDomString,
+} from "../src/modules/quickChatDom";
 import {
   LLMNoteMetadataService,
   type LLMNoteMetadata,
@@ -174,6 +179,57 @@ describe("note Markdown rendering", function () {
     expect(inline).not.to.contain("katex-error");
     expect(environment).to.contain('class="katex-display"');
     expect(environment).not.to.contain("katex-error");
+  });
+
+  it("wraps undelimited model TeX before KaTeX runs", function () {
+    const kl = markdownToDisplayHtml("d = \\sqrt{D_{KL}(\\pi || \\pi_{init})}");
+    const bon = markdownToDisplayHtml(
+      "R_{BoN}(d) = d(\\alpha_{BoN} - \\beta_{BoN} d)",
+    );
+    const prose = markdownToDisplayHtml(
+      "The distance is d = \\sqrt{D_{KL}(\\pi || \\pi_{init})}.",
+    );
+    const escaped = markdownToDisplayHtml(String.raw`d = \\sqrt{x}`);
+    const fenced = markdownToDisplayHtml(
+      "```\n\\sqrt{x}\n```\n\nReal $E=mc^2$.",
+    );
+    const snake = markdownToDisplayHtml("Use loss_function in the code.");
+
+    for (const html of [kl, bon, prose, escaped]) {
+      expect(html).to.contain('class="katex"');
+      expect(html).not.to.contain("katex-error");
+    }
+    expect(kl).to.contain('class="katex-display"');
+    expect(bon).to.contain('class="katex-display"');
+    expect(prose).to.contain("The distance is");
+    expect(prose).to.contain('class="katex-inline"');
+    expect(fenced).to.contain("\\sqrt{x}");
+    expect(fenced).to.contain('class="katex-inline"');
+    expect(snake).to.contain("loss_function");
+    expect(snake).not.to.contain("katex");
+
+    const visible = (html: string) =>
+      html
+        .replace(/<span class="katex-mathml"[\s\S]*?<\/span>/g, "")
+        .replace(/<[^>]+>/g, "");
+    expect(visible(kl)).not.to.contain("\\sqrt");
+    expect(visible(bon)).not.to.contain("_{BoN}");
+    expect(visible(escaped)).not.to.contain("\\sqrt");
+  });
+
+  it("keeps rendered KaTeX nodes through the quick-chat sanitizers", function () {
+    const html = markdownToDisplayHtml(
+      "d = \\sqrt{D_{KL}(\\pi || \\pi_{init})}",
+    );
+    const passed = normalizeQuickChatXhtml(sanitizeQuickChatDomString(html));
+
+    expect(passed).to.contain('class="katex"');
+    expect(passed).to.contain('class="katex-display"');
+    expect(passed).to.contain("katex-html");
+    expect(passed).not.to.contain("katex-error");
+    expect(passed.match(/class="katex"/g)?.length).to.equal(
+      html.match(/class="katex"/g)?.length,
+    );
   });
 
   it("normalizes double-escaped math delimiters and commands", function () {
@@ -409,5 +465,47 @@ describe("note Markdown rendering", function () {
       },
     ]);
     expect(updated).not.to.contain("remove question");
+  });
+
+  it("renders summary note math with the same KaTeX path as chat", function () {
+    const html = renderZoteroNoteDisplayHtml(
+      '<p><span class="math">$\\phi$</span> and $\\mu$</p>',
+    );
+    const text = html.replace(/<[^>]+>/g, "");
+
+    expect(html).to.contain('class="katex"');
+    expect(html).to.not.contain('class="math"');
+    expect(text).to.not.contain("$");
+    expect(html).to.not.contain("katex-error");
+  });
+
+  it("keeps dollars inside code literal and renders display subscripts", function () {
+    const code = renderZoteroNoteDisplayHtml("<code>$\\phi$</code>");
+    const display = renderZoteroNoteDisplayHtml(
+      '<pre class="math">$$a_b$$</pre>',
+    );
+    const quoted = renderZoteroNoteDisplayHtml(
+      "<span class='math'>$\\phi(\\cdot)$</span>",
+    );
+    const entities = renderZoteroNoteDisplayHtml("<p>&#36;\\phi&#36;</p>");
+
+    expect(code).to.contain("$\\phi$");
+    expect(code).to.not.contain("katex");
+    expect(display).to.contain("katex-display");
+    expect(display).to.contain("katex-strut");
+    expect(quoted).to.contain('class="katex"');
+    expect(quoted.replace(/<[^>]+>/g, "")).to.not.contain("$");
+    expect(entities).to.contain('class="katex"');
+    expect(entities).to.not.contain("&#36;");
+    expect(entities.replace(/<[^>]+>/g, "")).to.not.contain("$");
+  });
+
+  it("splits adjacent inline formulas instead of leaving the dollars", function () {
+    const html = renderZoteroNoteDisplayHtml("<p>$\\phi(p)$$\\phi(1-p)$</p>");
+    const text = html.replace(/<[^>]+>/g, "");
+
+    expect(html).to.contain('class="katex"');
+    expect(text).to.not.contain("$");
+    expect(html).to.not.contain("katex-error");
   });
 });

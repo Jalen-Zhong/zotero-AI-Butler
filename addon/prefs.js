@@ -134,6 +134,7 @@ pref(
   '["actionButtons","note","deepRead","table","imageSummary","mindmap","quickChat"]',
 );
 pref("__prefsPrefix__.sidebarActiveTab", "chat");
+pref("__prefsPrefix__.sidebarSectionHeight", "640");
 pref("__prefsPrefix__.sidebarNoteCollapsed", false);
 pref("__prefsPrefix__.sidebarImageCollapsed", false);
 pref("__prefsPrefix__.quickChatSuppressNewConversationWarning", false);

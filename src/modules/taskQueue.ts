@@ -570,10 +570,10 @@ export class TaskQueueManager {
     artifactType: FixedTaskArtifactType,
     options?: TaskItem["options"],
   ): boolean {
+    if (options?.forceOverwrite) {
+      return true;
+    }
     if (artifactType === "summary" || artifactType === "deepRead") {
-      if (options?.forceOverwrite) {
-        return true;
-      }
       const policy = (
         (getPref("noteStrategy" as any) as string) || "skip"
       ).toLowerCase();
@@ -1215,6 +1215,7 @@ export class TaskQueueManager {
   public async addMindmapTask(
     item: Zotero.Item,
     priority: boolean = true,
+    options?: TaskOptions,
   ): Promise<string> {
     const taskId = `mindmap-task-${item.id}`;
 
@@ -1226,7 +1227,7 @@ export class TaskQueueManager {
         item,
         "mindmap",
         priority,
-        undefined,
+        options,
         getString("task-stage-waiting-start"),
       );
       if (shouldRun) {
@@ -1254,6 +1255,7 @@ export class TaskQueueManager {
       maxRetries: 2,
       taskType: "mindmap",
       workflowStage: getString("task-stage-waiting-start"),
+      options,
     };
 
     this.tasks.set(taskId, task);

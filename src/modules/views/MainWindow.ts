@@ -32,6 +32,7 @@ import { prepareDocument } from "../../compatibility/document";
 import { DashboardView } from "./DashboardView";
 import { SummaryView } from "./SummaryView";
 import { AgentView } from "./agent/AgentView";
+import { ChatView } from "./ChatView";
 import { TaskQueueView } from "./TaskQueueView";
 import { SettingsView } from "./SettingsView";
 import { LibraryScannerView } from "./LibraryScannerView";
@@ -52,6 +53,7 @@ import {
 export type TabType =
   | "dashboard"
   | "summary"
+  | "chat"
   | "agent"
   | "tasks"
   | "settings"
@@ -141,6 +143,8 @@ export class MainWindow {
 
   private agentView: AgentView;
 
+  private chatView: ChatView;
+
   /** 任务队列视图 */
   private taskQueueView: TaskQueueView;
 
@@ -160,6 +164,7 @@ export class MainWindow {
     // 初始化各个视图
     this.dashboardView = new DashboardView();
     this.summaryView = new SummaryView();
+    this.chatView = new ChatView();
     this.agentView = new AgentView();
     this.taskQueueView = new TaskQueueView();
     this.settingsView = new SettingsView();
@@ -175,6 +180,7 @@ export class MainWindow {
     // 注册视图
     this.views.set("dashboard", this.dashboardView);
     this.views.set("summary", this.summaryView);
+    this.views.set("chat", this.chatView);
     this.views.set("agent", this.agentView);
     this.views.set("tasks", this.taskQueueView);
     this.views.set("settings", this.settingsView);
@@ -523,11 +529,6 @@ export class MainWindow {
           icon: "📊",
         },
         {
-          id: "summary",
-          label: getString("main-window-tab-summary"),
-          icon: "📝",
-        },
-        {
           id: "agent",
           label: getString("main-window-tab-agent"),
           icon: "✦",
@@ -607,6 +608,16 @@ export class MainWindow {
       agentLink.href = `chrome://${config.addonRef}/content/agent.css`;
       head.appendChild(agentLink);
     }
+    if (!doc.getElementById("ai-butler-katex-css-link")) {
+      const katexLink = doc.createElement("link");
+      katexLink.id = "ai-butler-katex-css-link";
+      katexLink.rel = "stylesheet";
+      katexLink.href = `chrome://${config.addonRef}/content/katex.min.css`;
+      head.appendChild(katexLink);
+    }
+    void import("../katexStyle").then(({ injectHtmlKatexStyle }) =>
+      injectHtmlKatexStyle(doc, "ai-butler-katex-style"),
+    );
   }
 
   /**
@@ -637,6 +648,11 @@ export class MainWindow {
    * @param force 强制切换(即使已是当前标签)
    */
   public switchTab(tabId: TabType, force: boolean = false): void {
+    // Summary and Chat are sidebar tabs. Keep their views for task streaming,
+    // but never show them as a main-window surface.
+    if (tabId === "summary" || tabId === "chat") {
+      tabId = "dashboard";
+    }
     if (this.activeTab === tabId && !force) return;
 
     // 隐藏当前视图
@@ -769,6 +785,10 @@ export class MainWindow {
    */
   public getSummaryView(): SummaryView {
     return this.summaryView;
+  }
+
+  public getChatView(): ChatView {
+    return this.chatView;
   }
 
   /**

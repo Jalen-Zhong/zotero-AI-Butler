@@ -642,6 +642,51 @@
   border: 0;
   border-top: 1px solid var(--agent-border);
 }
+.agent-event-body.agent-markdown {
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.agent-markdown .katex,
+.agent-markdown .katex-display,
+.agent-markdown .katex * {
+  max-width: none !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+  white-space: nowrap !important;
+}
+.agent-markdown .katex-scroll-container {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0.6em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap !important;
+}
+.agent-markdown .katex-scroll-container .katex-display {
+  display: inline-block !important;
+  width: auto;
+  max-width: none !important;
+  margin: 0;
+  overflow: visible !important;
+  text-align: left;
+}
+.agent-markdown .katex-inline {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: middle;
+  white-space: nowrap !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+}
+.agent-markdown .katex-inline > .katex,
+.agent-markdown .katex-scroll-container .katex {
+  display: inline-block !important;
+  max-width: none !important;
+}
 
 /* Floating composer and its attached options popover. */
 .agent-composer-area {

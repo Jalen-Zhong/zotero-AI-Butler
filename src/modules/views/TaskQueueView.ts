@@ -955,7 +955,6 @@ export class TaskQueueView extends BaseView {
       }
 
       const win = MainWindow.getInstance();
-      await win.open("summary");
       const view = win.getSummaryView();
       view.clear();
       // 使用任务的 startedAt 作为计时起点，避免每次进入都从 0 开始
@@ -1120,7 +1119,7 @@ export class TaskQueueView extends BaseView {
       actions.appendChild(copyErrorBtn);
     }
 
-    if (task.taskType === "deepRead" && task.status === TaskStatus.COMPLETED) {
+    if (task.taskType === "deepRead" && task.status === TaskStatus.FAILED) {
       const completeDeepReadBtn = this.createElement("button", {
         styles: {
           padding: "6px 12px",

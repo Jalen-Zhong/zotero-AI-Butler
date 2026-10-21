@@ -409,6 +409,17 @@ export function hasIncompleteDeepReadContent(noteHtml: string): boolean {
   return hasDeepReadPlaceholderText(textContent);
 }
 
+/** A finished deep read must not resume when the user confirmed overwrite. */
+export function shouldResumeDeepRead(
+  existingHtml: string | null | undefined,
+  forceOverwrite = false,
+): boolean {
+  if (forceOverwrite) return false;
+  const html = existingHtml?.trim() || "";
+  if (!html) return false;
+  return hasDeepReadV2Slots(html) || hasIncompleteDeepReadContent(html);
+}
+
 function hasDeepReadPlaceholderText(text: string): boolean {
   const compact = text.replace(/\s+/g, "").trim();
   const spaced = text.replace(/\s+/g, " ").trim().toLowerCase();

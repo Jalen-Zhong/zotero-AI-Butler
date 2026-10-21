@@ -127,6 +127,17 @@ export const DEFAULT_CONTEXT_MENU_ITEM_VISIBILITY: ContextMenuVisibility = {
 
 export const DEFAULT_SIDEBAR_MODULE_VISIBILITY: SidebarModuleVisibility = {
   actionButtons: true,
+  note: true,
+  deepRead: true,
+  table: false,
+  imageSummary: false,
+  mindmap: true,
+  quickChat: true,
+};
+
+/** jalen.4 and earlier hid the summary tab. Only that exact saved map is upgraded. */
+const PREVIOUS_FORK_SIDEBAR_VISIBILITY: SidebarModuleVisibility = {
+  actionButtons: true,
   note: false,
   deepRead: true,
   table: false,
@@ -134,6 +145,29 @@ export const DEFAULT_SIDEBAR_MODULE_VISIBILITY: SidebarModuleVisibility = {
   mindmap: true,
   quickChat: true,
 };
+
+export function migrateForkSidebarSummaryVisibility(): void {
+  const raw = getPref("sidebarModuleVisibility");
+  if (typeof raw !== "string" || !raw.trim()) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const record = parsed as Record<string, unknown>;
+  const previousKeys = Object.keys(PREVIOUS_FORK_SIDEBAR_VISIBILITY);
+  if (Object.keys(record).length !== previousKeys.length) return;
+  for (const key of previousKeys) {
+    if (
+      record[key] !== PREVIOUS_FORK_SIDEBAR_VISIBILITY[key as SidebarModuleId]
+    ) {
+      return;
+    }
+  }
+  setPref("sidebarModuleVisibility", DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF);
+}
 
 export const DEFAULT_SIDEBAR_MODULE_ORDER: SidebarModuleId[] = [
   "actionButtons",

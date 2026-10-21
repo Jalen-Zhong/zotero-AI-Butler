@@ -96,6 +96,7 @@ declare namespace _ZoteroTypes {
       "sidebarModuleVisibility": string;
       "sidebarModuleOrder": string;
       "sidebarActiveTab": string;
+      "sidebarSectionHeight": string;
       "sidebarNoteCollapsed": boolean;
       "sidebarImageCollapsed": boolean;
       "quickChatSuppressNewConversationWarning": boolean;

@@ -50,6 +50,7 @@ import {
   DEFAULT_CONTEXT_MENU_ITEM_VISIBILITY_PREF,
   DEFAULT_SIDEBAR_MODULE_ORDER_PREF,
   DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF,
+  migrateForkSidebarSummaryVisibility,
   getContextMenuItemOrder,
   isContextMenuCollapsed,
   isContextMenuItemEnabled,
@@ -250,6 +251,7 @@ function registerPrefsPane() {
  * - promptVersion: 提示词版本号(用于版本升级)
  */
 function initializeDefaultPrefsOnStartup() {
+  migrateForkSidebarSummaryVisibility();
   // 定义所有配置项的默认值
   const defaults: Record<string, any> = {
     openaiApiKey: "", // API 密钥默认为空,需用户配置
@@ -294,6 +296,7 @@ function initializeDefaultPrefsOnStartup() {
     sidebarModuleVisibility: DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF,
     sidebarModuleOrder: DEFAULT_SIDEBAR_MODULE_ORDER_PREF,
     sidebarActiveTab: "chat",
+    sidebarSectionHeight: "640",
     openTaskPanelOnSummon: false,
     autoScanSummaryEnabled: true,
     autoScanDeepReadEnabled: false,
@@ -1658,16 +1661,8 @@ async function registerItemPaneSection() {
  */
 async function handleOpenAIChat(itemId: number): Promise<void> {
   try {
-    // 打开主窗口并切换到摘要视图
-    const mainWin = MainWindow.getInstance();
-    await mainWin.open("summary");
-
-    // 获取 SummaryView 并加载文献
-    const summaryView = mainWin.getSummaryView();
-    if (summaryView) {
-      // 调用 loadItemForChat 方法加载文献并显示聊天界面
-      await (summaryView as any).loadItemForChat(itemId);
-    }
+    const { focusSidebarTab } = await import("./modules/ItemPaneSection");
+    await focusSidebarTab("chat", itemId);
   } catch (error: any) {
     ztoolkit.log("[AI-Butler] 打开 AI 追问失败:", error);
     new ztoolkit.ProgressWindow("AI Butler", {

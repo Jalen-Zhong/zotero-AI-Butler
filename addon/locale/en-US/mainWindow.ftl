@@ -1,4 +1,7 @@
 main-window-tab-agent = Agent
+main-window-tab-chat = Chat
+chat-view-empty = Select a paper in Zotero, then open Chat.
+chat-view-use-selection = Use selected paper
 agent-brand = Butler Agent
 agent-sessions = Sessions
 agent-new-session = New session

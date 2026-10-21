@@ -33,6 +33,10 @@ import {
 } from "./chatContext";
 import { chatPersist } from "./chatPersist";
 import {
+  normalizeQuickChatXhtml,
+  sanitizeQuickChatDomString,
+} from "./quickChatDom";
+import {
   buildQuickChatQuestionWithRelatedContext,
   createQuickChatRelatedContextSignature,
   getQuickChatRelatedLimit,
@@ -46,16 +50,11 @@ import { openQuickChatRelatedSelectorDialog } from "./quickChatRelatedSelector";
 import {
   addZoteroNoteOverflowGuards,
   buildFollowUpChatPairNoteHtml,
-  decodeMathHtmlEntities,
   normalizeFollowUpChatNoteHtml,
-  normalizeLatexForKatex,
-  requiresDisplayMath,
-  stripMathDelimiters,
-  replaceInlineMath,
+  renderZoteroNoteDisplayHtml,
 } from "./noteMarkdown";
 import { AiNoteService, type AiNoteKind } from "./aiNoteService";
 import { SummaryView } from "./views/SummaryView";
-import katex from "katex";
 // 注意: 不在主进程中直接 import 思维导图库（如 markmap-view、simple-mind-map）
 // 这些库在加载时会访问 document/window，而 Zotero Background 进程没有 DOM 环境
 // 改用 iframe 架构：在独立 HTML 页面中加载这些库
@@ -252,9 +251,8 @@ type SidebarNoteEditState = {
 };
 
 let sidebarAutoRefreshBound = false;
-let sidebarRefreshTimer: number | null = null;
 let sidebarNoteEditState: SidebarNoteEditState | null = null;
-const pendingSidebarRefreshTargets = new Set<SidebarAutoRefreshTarget>();
+const sidebarContentLoadSerial = new Map<string, number>();
 const quickChatToggleListeners = new WeakMap<HTMLElement, EventListener>();
 const sidebarNoteEditEventCleanups = new WeakMap<HTMLElement, () => void>();
 const sidebarWorkspaceResizeObservers = new WeakMap<
@@ -262,9 +260,14 @@ const sidebarWorkspaceResizeObservers = new WeakMap<
   ResizeObserver
 >();
 const sidebarWorkspaceMenuCleanups = new WeakMap<HTMLElement, () => void>();
+let sidebarSectionResizing = false;
 const SIDEBAR_SUMMARY_SELECTION_PREF = "sidebarSelectedSummaryBlockIds" as any;
 
 type SidebarTabId = "summary" | "chat" | "deepRead" | "mindmap" | "quickRead";
+
+/** Last tab the user opened. A rebuild during Generate must not fall back to Summary. */
+let sidebarActiveTabId: SidebarTabId | null = null;
+let showSidebarTab: ((tabId: SidebarTabId) => void) | null = null;
 
 type SidebarTabDefinition = {
   id: SidebarTabId;
@@ -275,6 +278,12 @@ type SidebarTabDefinition = {
 
 const SIDEBAR_TAB_DEFINITIONS: SidebarTabDefinition[] = [
   {
+    id: "summary",
+    labelKey: "itempane-tab-summary",
+    icon: "✦",
+    isAvailable: () => isSidebarModuleEnabled("note"),
+  },
+  {
     id: "chat",
     labelKey: "itempane-tab-chat",
     icon: "◌",
@@ -283,22 +292,16 @@ const SIDEBAR_TAB_DEFINITIONS: SidebarTabDefinition[] = [
       isSidebarModuleEnabled("quickChat"),
   },
   {
-    id: "mindmap",
-    labelKey: "itempane-tab-mindmap",
-    icon: "🧠",
-    isAvailable: () => isSidebarModuleEnabled("mindmap"),
-  },
-  {
     id: "deepRead",
     labelKey: "itempane-tab-deep-read",
     icon: "◇",
     isAvailable: () => isSidebarModuleEnabled("deepRead"),
   },
   {
-    id: "summary",
-    labelKey: "itempane-tab-summary",
-    icon: "✦",
-    isAvailable: () => isSidebarModuleEnabled("note"),
+    id: "mindmap",
+    labelKey: "itempane-tab-mindmap",
+    icon: "🧠",
+    isAvailable: () => isSidebarModuleEnabled("mindmap"),
   },
   {
     id: "quickRead",
@@ -683,25 +686,89 @@ function parseTaskTarget(taskId: string): {
   return { itemId, target };
 }
 
-function scheduleSidebarRefresh(target: SidebarAutoRefreshTarget): void {
-  pendingSidebarRefreshTargets.add(target);
-  if (sidebarRefreshTimer) {
-    clearTimeout(sidebarRefreshTimer);
-  }
-  // Debounce: allow Zotero to finish saving notes/attachments
-  sidebarRefreshTimer = setTimeout(() => {
-    void runSidebarRefresh().catch((e) => {
-      ztoolkit.log("[AI-Butler] Sidebar auto-refresh failed:", e);
-    });
-  }, 500) as any as number;
+function beginSidebarContentLoad(key: string): number {
+  const next = (sidebarContentLoadSerial.get(key) || 0) + 1;
+  sidebarContentLoadSerial.set(key, next);
+  return next;
 }
 
-async function runSidebarRefresh(): Promise<void> {
+function sidebarContentLoadIsCurrent(key: string, serial: number): boolean {
+  return sidebarContentLoadSerial.get(key) === serial;
+}
+
+function sidebarPaneRoot(): ParentNode | null {
+  const body = sidebarRenderContext?.body;
+  if (body && body.isConnected !== false) return body;
+  return sidebarContext?.doc ?? null;
+}
+
+function sidebarQueryById(id: string): HTMLElement | null {
+  const root = sidebarPaneRoot();
+  if (!root) return null;
+  return root.querySelector(`#${id}`) as HTMLElement | null;
+}
+
+function scheduleSidebarRefresh(
+  target: SidebarAutoRefreshTarget,
+  itemId?: number,
+): void {
+  const reload = (attempt: number): void => {
+    if (
+      typeof itemId === "number" &&
+      !sidebarContextItemIds().includes(itemId)
+    ) {
+      return;
+    }
+    const startedItemId = sidebarContext?.itemId;
+    void runSidebarRefresh([target])
+      .then(async () => {
+        if (!sidebarContext || sidebarContext.itemId !== startedItemId) return;
+        if (attempt >= 2 || !isSidebarJobTarget(target)) return;
+        if (!(await sidebarFeatureStillStale(target))) return;
+        const delay = attempt === 0 ? 700 : 1600;
+        setTimeout(() => reload(attempt + 1), delay);
+      })
+      .catch((e) => {
+        ztoolkit.log("[AI-Butler] Sidebar auto-refresh failed:", e);
+      });
+  };
+  reload(0);
+}
+
+/** Deep Read saved another section. Reload that tab without leaving it. */
+export function notifySidebarDeepReadSectionSaved(itemId: number): void {
+  if (!sidebarContextItemIds().includes(itemId)) return;
+  scheduleSidebarRefresh("deepRead", itemId);
+}
+
+function sidebarFeatureStillStale(target: SidebarJobKind): boolean {
+  const element =
+    target === "mindmap"
+      ? sidebarQueryById("ai-butler-mindmap-container")
+      : sidebarQueryById(
+          getSidebarNoteElementId("ai-butler-note-content", target),
+        );
+  if (!element) return true;
+  const text = element.textContent || "";
+  if (text.includes(getString("itempane-status-refreshing"))) return true;
+  if (target === "mindmap") {
+    return text.includes(getString("itempane-no-mindmap"));
+  }
+  return text.includes(
+    getString("itempane-note-empty-kind", {
+      args: { kind: getSidebarNoteKindLabel(target) },
+    }),
+  );
+}
+
+async function runSidebarRefresh(
+  explicitTargets?: SidebarAutoRefreshTarget[],
+): Promise<void> {
   if (!sidebarContext) return;
 
-  const { doc, itemId } = sidebarContext;
-  const targets = Array.from(pendingSidebarRefreshTargets);
-  pendingSidebarRefreshTargets.clear();
+  const { itemId } = sidebarContext;
+  const targets = explicitTargets ? explicitTargets.slice() : [];
+  if (!targets.length) return;
 
   let item: Zotero.Item = sidebarContext.item;
   try {
@@ -715,71 +782,62 @@ async function runSidebarRefresh(): Promise<void> {
 
   if (!sidebarContext || sidebarContext.itemId !== itemId) return;
 
-  if (targets.includes("summary")) {
-    const noteContent = doc.getElementById(
-      getSidebarNoteElementId("ai-butler-note-content", "summary"),
-    ) as HTMLElement | null;
-    if (noteContent) {
-      if (isSidebarNoteEditing(itemId)) {
-        setSidebarNoteEditStatus(
-          doc,
-          getString("itempane-note-editing-skip-auto-refresh"),
-          undefined,
-          "summary",
-        );
-      } else {
-        noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
-        await loadNoteContent(doc, item, noteContent, "summary");
-      }
+  const reloadNote = async (kind: "summary" | "deepRead"): Promise<void> => {
+    const noteContent = sidebarQueryById(
+      getSidebarNoteElementId("ai-butler-note-content", kind),
+    );
+    const doc = noteContent?.ownerDocument;
+    if (!noteContent || !doc) return;
+    if (isSidebarNoteEditing(itemId)) {
+      setSidebarNoteEditStatus(
+        doc,
+        getString("itempane-note-editing-skip-auto-refresh"),
+        undefined,
+        kind,
+      );
+      return;
     }
-  }
+    const visibleText = noteContent.textContent || "";
+    const keepVisible =
+      visibleText.trim().length > 0 &&
+      !visibleText.includes(getString("itempane-status-refreshing"));
+    if (!keepVisible) {
+      noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    }
+    const scroller = noteContent.parentElement;
+    const scrollTop = scroller?.scrollTop || 0;
+    await loadNoteContent(doc, item, noteContent, kind, { keepVisible });
+    if (scroller?.isConnected) scroller.scrollTop = scrollTop;
+  };
 
-  if (targets.includes("deepRead")) {
-    const noteContent = doc.getElementById(
-      getSidebarNoteElementId("ai-butler-note-content", "deepRead"),
-    ) as HTMLElement | null;
-    if (noteContent) {
-      if (isSidebarNoteEditing(itemId)) {
-        setSidebarNoteEditStatus(
-          doc,
-          getString("itempane-note-editing-skip-auto-refresh"),
-          undefined,
-          "deepRead",
-        );
-      } else {
-        noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
-        await loadNoteContent(doc, item, noteContent, "deepRead");
-      }
-    }
-  }
+  if (targets.includes("summary")) await reloadNote("summary");
+  if (targets.includes("deepRead")) await reloadNote("deepRead");
 
   if (targets.includes("imageSummary")) {
-    const imageContainer = doc.getElementById(
-      "ai-butler-image-container",
-    ) as HTMLElement | null;
-    const imageBtnContainer = doc.getElementById(
-      "ai-butler-image-btn-container",
-    ) as HTMLElement | null;
-    if (imageContainer && imageBtnContainer) {
+    const imageContainer = sidebarQueryById("ai-butler-image-container");
+    const imageBtnContainer = sidebarQueryById("ai-butler-image-btn-container");
+    const doc = imageContainer?.ownerDocument;
+    if (imageContainer && imageBtnContainer && doc) {
       imageContainer.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
       await loadImageSummary(doc, item, imageContainer, imageBtnContainer);
     }
   }
 
   if (targets.includes("mindmap")) {
-    const mindmapContainer = doc.getElementById(
-      "ai-butler-mindmap-container",
-    ) as HTMLElement | null;
-    if (mindmapContainer) {
+    const mindmapContainer = sidebarQueryById("ai-butler-mindmap-container");
+    const doc = mindmapContainer?.ownerDocument;
+    if (mindmapContainer && doc) {
       mindmapContainer.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
-      await loadMindmapContent(doc, item, mindmapContainer);
+      await loadMindmapContent(doc, item, mindmapContainer, {
+        mode: mindmapContainer.closest(".ai-butler-sidebar-tab-panel")
+          ? "page"
+          : "card",
+      });
     }
   }
 
   if (targets.includes("table")) {
-    const tableContent = doc.getElementById(
-      "ai-butler-table-content",
-    ) as HTMLElement | null;
+    const tableContent = sidebarQueryById("ai-butler-table-content");
     if (tableContent) {
       tableContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
       await loadTableContent(item, tableContent);
@@ -792,15 +850,54 @@ async function ensureSidebarAutoRefresh(): Promise<void> {
   sidebarAutoRefreshBound = true;
 
   try {
-    const { TaskQueueManager } = await import("./taskQueue");
+    const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
     const manager = TaskQueueManager.getInstance();
 
+    manager.onProgress((taskId, progress, message) => {
+      const parsed = parseTaskTarget(taskId);
+      if (!parsed || !isSidebarJobTarget(parsed.target)) return;
+      if (!sidebarContextItemIds().includes(parsed.itemId)) return;
+      const task = manager.getTask(taskId);
+      if (
+        !task ||
+        task.status === TaskStatus.COMPLETED ||
+        task.status === TaskStatus.FAILED
+      ) {
+        closeSidebarJob(parsed.target, taskId);
+        return;
+      }
+      sidebarJobClosed.delete(taskId);
+      sidebarJobMessages.set(taskId, message);
+      paintSidebarJobProgress(parsed.target, progress, message);
+    });
+
     manager.onComplete((taskId, success) => {
-      if (!success) return;
       const parsed = parseTaskTarget(taskId);
       if (!parsed) return;
-      if (!sidebarContext || sidebarContext.itemId !== parsed.itemId) return;
-      scheduleSidebarRefresh(parsed.target);
+      if (!sidebarContextItemIds().includes(parsed.itemId)) return;
+      const task = manager.getTask(taskId);
+      const stillQueued =
+        task?.status === TaskStatus.PENDING ||
+        task?.status === TaskStatus.PRIORITY ||
+        task?.status === TaskStatus.PROCESSING;
+      if (stillQueued) {
+        sidebarJobClosed.delete(taskId);
+        if (isSidebarJobTarget(parsed.target)) {
+          paintSidebarJobProgress(
+            parsed.target,
+            task?.progress || 0,
+            sidebarJobMessages.get(taskId) ||
+              task?.workflowStage ||
+              getString("itempane-sidebar-job-queued"),
+          );
+        }
+        return;
+      }
+      if (isSidebarJobTarget(parsed.target)) {
+        closeSidebarJob(parsed.target, taskId);
+        return;
+      }
+      if (success) scheduleSidebarRefresh(parsed.target);
     });
   } catch (error) {
     ztoolkit.log("[AI-Butler] Sidebar auto-refresh bind failed:", error);
@@ -812,6 +909,16 @@ async function ensureSidebarAutoRefresh(): Promise<void> {
  *
  * @param handleOpenAIChat 打开 AI 追问的回调函数
  */
+export function mountPersistedItemChat(
+  host: HTMLElement,
+  item: Zotero.Item,
+): void {
+  const doc = host.ownerDocument;
+  if (!doc) return;
+  host.replaceChildren();
+  renderChatArea(host, doc, item, true, { mode: "page" });
+}
+
 export function registerItemPaneSection(
   handleOpenAIChat: (itemId: number) => Promise<void>,
 ): void {
@@ -892,11 +999,60 @@ export async function refreshCurrentItemPaneSection(options?: {
   renderItemPaneSection(body, item, handleOpenAIChat, options);
 }
 
+/** Open one sidebar tab for the selected paper. Summary and Chat stay here. */
+export async function focusSidebarTab(
+  tabId: SidebarTabId,
+  itemId?: number,
+): Promise<void> {
+  setPref("sidebarActiveTab", tabId);
+  try {
+    const pane = Zotero.getActiveZoteroPane?.();
+    if (pane && typeof itemId === "number") {
+      const selected = pane.getSelectedItems?.() || [];
+      const already = selected.some(
+        (selectedItem: Zotero.Item) => selectedItem.id === itemId,
+      );
+      if (!already && typeof pane.selectItem === "function") {
+        await pane.selectItem(itemId);
+      }
+    }
+    const doc =
+      pane?.document ||
+      (Zotero.getMainWindow?.()?.document as Document | undefined);
+    const sidenav = doc?.querySelector(
+      '[data-pane="ai-butler-chat-section"]',
+    ) as HTMLElement | null;
+    sidenav?.click();
+  } catch (error) {
+    ztoolkit.log("[AI-Butler] 聚焦侧边栏标签失败:", error);
+  }
+  await refreshCurrentItemPaneSection({ force: true });
+}
+
 /**
  * 渲染条目面板侧边栏内容
  */
 function sidebarHasQuickChat(body: HTMLElement): boolean {
   return !!body.querySelector("#ai-butler-inline-chat");
+}
+
+/** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
+const SIDEBAR_LAYOUT_GENERATION = "12";
+
+/** Drag floor. A shorter shell clips the tab row. */
+const SIDEBAR_STACKED_MIN_HEIGHT = 360;
+/** First-open height for a stacked reader section. Taller than the drag floor. */
+const SIDEBAR_STACKED_DEFAULT_HEIGHT = 640;
+const SIDEBAR_STACKED_MAX_HEIGHT = 2400;
+
+const renderedSidebarPanels = new WeakSet<HTMLElement>();
+
+function sidebarChromeIsCurrent(body: HTMLElement): boolean {
+  if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
+  const shell = body.querySelector(".ai-butler-sidebar-shell");
+  return (
+    shell?.getAttribute("data-ai-butler-layout") === SIDEBAR_LAYOUT_GENERATION
+  );
 }
 
 function persistActiveQuickChatThread(): void {
@@ -910,6 +1066,46 @@ function persistActiveQuickChatThread(): void {
     }
   } catch (err) {
     ztoolkit.log("[AI-Butler] ChatPersist save failed:", err);
+  }
+}
+
+function scheduleEnsureSidebarNotesLoaded(): void {
+  const itemId = sidebarRenderContext?.itemId;
+  const view = sidebarRenderContext?.body.ownerDocument?.defaultView;
+  const run = (): void => {
+    if (!sidebarRenderContext || sidebarRenderContext.itemId !== itemId) return;
+    void ensureSidebarNotesLoaded();
+  };
+  if (view) view.setTimeout(run, 0);
+  else setTimeout(run, 0);
+}
+
+async function ensureSidebarNotesLoaded(): Promise<void> {
+  const ctx = sidebarRenderContext;
+  if (!ctx?.item.isRegularItem()) return;
+  const { body, item, handleOpenAIChat } = ctx;
+  const doc = body.ownerDocument;
+  if (!doc) return;
+
+  for (const kind of ["summary", "deepRead"] as const) {
+    if (sidebarRenderContext?.itemId !== item.id) return;
+    const panel = body.querySelector(
+      `.ai-butler-sidebar-tab-panel[data-tab-id="${kind}"]`,
+    ) as HTMLElement | null;
+    if (!panel) continue;
+    const noteContent = panel.querySelector(
+      `#${getSidebarNoteElementId("ai-butler-note-content", kind)}`,
+    ) as HTMLElement | null;
+    if (!noteContent) {
+      panel.replaceChildren();
+      renderSidebarTabPanel(kind, panel, doc, item, handleOpenAIChat);
+      continue;
+    }
+    const text = noteContent.textContent || "";
+    if (text.includes(getString("itempane-status-refreshing"))) continue;
+    if (noteContent.childElementCount > 0 || text.trim()) continue;
+    noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    await loadNoteContent(doc, item, noteContent, kind);
   }
 }
 
@@ -943,7 +1139,8 @@ function renderItemPaneSection(
     item.isRegularItem() &&
     currentChatState.itemId === item.id &&
     body.childNodes.length > 0 &&
-    (currentChatState.isChatting || sidebarHasQuickChat(body))
+    (currentChatState.isChatting || sidebarHasQuickChat(body)) &&
+    sidebarChromeIsCurrent(body)
   ) {
     sidebarRenderContext = {
       body,
@@ -951,6 +1148,7 @@ function renderItemPaneSection(
       itemId: item.id,
       handleOpenAIChat,
     };
+    scheduleEnsureSidebarNotesLoaded();
     return;
   }
 
@@ -971,13 +1169,17 @@ function renderItemPaneSection(
     padding: 0;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 13px;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     max-width: 100%;
     min-width: 0;
-    height: 100%;
-    min-height: 0;
+    height: auto;
+    min-height: ${SIDEBAR_STACKED_MIN_HEIGHT}px;
     overflow: hidden;
     box-sizing: border-box;
+    background: #000;
+    color: #fff;
   `;
 
   // 检查是否有有效的文献条目
@@ -1031,6 +1233,9 @@ function renderItemPaneSection(
 
   const shell = doc.createElement("div");
   shell.className = "ai-butler-sidebar-shell";
+  shell.setAttribute("data-ai-butler-layout", SIDEBAR_LAYOUT_GENERATION);
+  shell.style.background = "#000";
+  shell.style.color = "#fff";
 
   const header = doc.createElement("div");
   header.className = "ai-butler-sidebar-topbar";
@@ -1101,16 +1306,28 @@ function renderItemPaneSection(
   const content = doc.createElement("div");
   content.className = "ai-butler-sidebar-content";
 
-  const preferredActiveTab = String(
-    getPref("sidebarActiveTab") || "chat",
+  const storedTab = String(
+    sidebarActiveTabId || getPref("sidebarActiveTab") || "chat",
   ) as SidebarTabId;
-  let activeTab = tabs.some((tab) => tab.id === preferredActiveTab)
-    ? preferredActiveTab
+  let activeTab = tabs.some((tab) => tab.id === storedTab)
+    ? storedTab
     : tabs[0].id;
+
+  const renderedTabs = new Set<SidebarTabId>();
+  const renderTab = (tabId: SidebarTabId): void => {
+    if (renderedTabs.has(tabId)) return;
+    const panel = panels.get(tabId);
+    if (!panel) return;
+    if (sidebarRenderContext?.itemId !== item.id) return;
+    renderedTabs.add(tabId);
+    renderSidebarTabPanel(tabId, panel, doc, item, handleOpenAIChat);
+  };
 
   const activateTab = (tabId: SidebarTabId): void => {
     if (!panels.has(tabId)) return;
+    renderTab(tabId);
     activeTab = tabId;
+    sidebarActiveTabId = activeTab;
     setPref("sidebarActiveTab", activeTab);
 
     for (const tab of tabs) {
@@ -1127,12 +1344,14 @@ function renderItemPaneSection(
         menuItem.classList.toggle("is-active", isActive);
       }
       if (panel) {
+        panel.classList.toggle("is-active", isActive);
         panel.style.display = isActive ? "flex" : "none";
         panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       }
     }
     applySidebarTabOverflow(nav, tabs, tabButtons, overflowMenuItems, moreWrap);
   };
+  showSidebarTab = activateTab;
 
   for (const tab of tabs) {
     const button = doc.createElement("button");
@@ -1195,33 +1414,217 @@ function renderItemPaneSection(
   for (const tab of tabs) {
     const panel = doc.createElement("div");
     panel.className = "ai-butler-sidebar-tab-panel";
+    if (tab.id === activeTab) panel.classList.add("is-active");
     panel.dataset.tabId = tab.id;
     panel.setAttribute("role", "tabpanel");
     panel.style.display = tab.id === activeTab ? "flex" : "none";
     panel.setAttribute("aria-hidden", tab.id === activeTab ? "false" : "true");
     panels.set(tab.id, panel);
     content.appendChild(panel);
-    renderSidebarTabPanel(tab.id, panel, doc, item, handleOpenAIChat);
   }
 
   nav.appendChild(refreshBtn);
   shell.appendChild(nav);
   shell.appendChild(content);
-  body.appendChild(shell);
-  bindSidebarWheelTrap(shell);
+  shell.appendChild(bindSidebarSectionResize(doc, body, shell));
 
-  activateTab(activeTab);
+  try {
+    body.appendChild(shell);
+    bindSidebarWheelTrap(shell);
+    // The shell is connected, so the active tab can load its saved note now.
+    activateTab(activeTab);
+    const noteTabsToWarm = (["summary", "deepRead"] as const).filter(
+      (tabId) => panels.has(tabId) && !renderedTabs.has(tabId),
+    );
+    const warmSidebarNoteTab = (index: number): void => {
+      if (!shell.isConnected || sidebarRenderContext?.itemId !== item.id) {
+        return;
+      }
+      const tabId = noteTabsToWarm[index];
+      if (!tabId) return;
+      renderTab(tabId);
+      if (index + 1 < noteTabsToWarm.length) {
+        doc.defaultView?.setTimeout(() => warmSidebarNoteTab(index + 1), 0);
+      }
+    };
+    if (noteTabsToWarm.length) {
+      const schedule = doc.defaultView
+        ? doc.defaultView.setTimeout.bind(doc.defaultView)
+        : setTimeout;
+      schedule(() => warmSidebarNoteTab(0), 0);
+    }
 
-  const ResizeObserverCtor = doc.defaultView?.ResizeObserver;
-  if (ResizeObserverCtor) {
-    const observer = new ResizeObserverCtor(relayoutSidebar);
-    observer.observe(nav);
-    observer.observe(body);
-    if (body.parentElement) observer.observe(body.parentElement);
-    sidebarWorkspaceResizeObservers.set(body, observer);
+    const ResizeObserverCtor = doc.defaultView?.ResizeObserver;
+    if (ResizeObserverCtor) {
+      const observer = new ResizeObserverCtor(relayoutSidebar);
+      observer.observe(nav);
+      observer.observe(body);
+      if (body.parentElement) observer.observe(body.parentElement);
+      sidebarWorkspaceResizeObservers.set(body, observer);
+    }
+
+    relayoutSidebar();
+    doc.defaultView?.setTimeout(relayoutSidebar, 0);
+  } catch (error) {
+    ztoolkit.log("[AI-Butler] 渲染侧边栏失败:", error);
+    if (!body.querySelector(".ai-butler-sidebar-shell")) {
+      const hint = doc.createElement("div");
+      hint.className = "ai-butler-sidebar-empty";
+      hint.textContent = getString("itempane-failed");
+      body.appendChild(hint);
+    }
   }
+}
 
-  doc.defaultView?.setTimeout(relayoutSidebar, 0);
+function sidebarElementIsHidden(el: HTMLElement): boolean {
+  if (el.hidden) return true;
+  const style = el.ownerDocument?.defaultView?.getComputedStyle(el);
+  return (
+    !!style && (style.display === "none" || style.visibility === "collapse")
+  );
+}
+
+/** Reader context pane shows every section at once. Sidenav mode hides the rest. */
+function sidebarPaneIsStacked(body: HTMLElement): boolean {
+  let node: HTMLElement | null = body;
+  for (let depth = 0; node && depth < 6; depth += 1) {
+    const parent = node.parentElement as HTMLElement | null;
+    if (!parent) break;
+    const visibleSectionSiblings = Array.from(parent.children).filter(
+      (child) => {
+        if (child === node) return false;
+        const el = child as HTMLElement;
+        if (sidebarElementIsHidden(el)) return false;
+        const isSection =
+          el.localName === "item-pane-section" ||
+          el.localName === "collapsible-section" ||
+          el.hasAttribute("data-pane") ||
+          !!el.querySelector?.(
+            "item-pane-section, collapsible-section, [data-pane]",
+          );
+        if (!isSection) return false;
+        const box = el.getBoundingClientRect?.();
+        return !!box && box.height > 24;
+      },
+    );
+    if (visibleSectionSiblings.length > 0) return true;
+    node = parent;
+  }
+  return false;
+}
+
+function clampSidebarSectionHeight(heightPx: number): number {
+  if (!Number.isFinite(heightPx)) return SIDEBAR_STACKED_DEFAULT_HEIGHT;
+  return Math.min(
+    SIDEBAR_STACKED_MAX_HEIGHT,
+    Math.max(SIDEBAR_STACKED_MIN_HEIGHT, Math.floor(heightPx)),
+  );
+}
+
+function readSidebarSectionHeight(): number {
+  try {
+    const raw = Number(getPref("sidebarSectionHeight"));
+    if (!Number.isFinite(raw) || raw < SIDEBAR_STACKED_MIN_HEIGHT) {
+      return SIDEBAR_STACKED_DEFAULT_HEIGHT;
+    }
+    return clampSidebarSectionHeight(raw);
+  } catch {
+    return SIDEBAR_STACKED_DEFAULT_HEIGHT;
+  }
+}
+
+function applySidebarBoxHeight(
+  body: HTMLElement,
+  shell: HTMLElement,
+  heightPx: number,
+): void {
+  const safe = Number.isFinite(heightPx)
+    ? Math.max(SIDEBAR_STACKED_MIN_HEIGHT, Math.floor(heightPx))
+    : SIDEBAR_STACKED_MIN_HEIGHT;
+  const px = `${safe}px`;
+  body.style.height = px;
+  body.style.minHeight = px;
+  body.style.maxHeight = "none";
+  shell.style.height = px;
+  shell.style.minHeight = px;
+  shell.style.maxHeight = px;
+}
+
+function syncSidebarResizeHandle(shell: HTMLElement, visible: boolean): void {
+  const handle = shell.querySelector(
+    ".ai-butler-sidebar-resize",
+  ) as HTMLElement | null;
+  if (!handle) return;
+  handle.style.display = visible ? "flex" : "none";
+}
+
+function bindSidebarSectionResize(
+  doc: Document,
+  body: HTMLElement,
+  shell: HTMLElement,
+): HTMLElement {
+  const handle = doc.createElement("div");
+  handle.className = "ai-butler-sidebar-resize";
+  handle.title = getString("itempane-section-resize");
+  handle.setAttribute("role", "separator");
+  handle.setAttribute("aria-orientation", "horizontal");
+  const grip = doc.createElement("span");
+  grip.className = "ai-butler-sidebar-resize-grip";
+  grip.setAttribute("aria-hidden", "true");
+  handle.appendChild(grip);
+
+  let dragging = false;
+  let startY = 0;
+  let startHeight = 0;
+  const listenerTarget = doc.defaultView || doc;
+
+  const finish = (): void => {
+    if (!dragging) return;
+    dragging = false;
+    sidebarSectionResizing = false;
+    if (doc.body) doc.body.style.cursor = "";
+    const height = clampSidebarSectionHeight(
+      shell.getBoundingClientRect().height || startHeight,
+    );
+    setPref("sidebarSectionHeight", String(height));
+    applySidebarBoxHeight(body, shell, height);
+  };
+  const onMove = (event: Event): void => {
+    if (!dragging) return;
+    const mouse = event as MouseEvent;
+    mouse.preventDefault();
+    mouse.stopPropagation();
+    applySidebarBoxHeight(
+      body,
+      shell,
+      clampSidebarSectionHeight(startHeight + mouse.clientY - startY),
+    );
+  };
+  const onUp = (): void => finish();
+
+  handle.addEventListener("mousedown", (event: MouseEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragging = true;
+    sidebarSectionResizing = true;
+    startY = event.clientY;
+    startHeight =
+      shell.getBoundingClientRect().height || readSidebarSectionHeight();
+    if (doc.body) doc.body.style.cursor = "ns-resize";
+  });
+  listenerTarget.addEventListener("mousemove", onMove, true);
+  listenerTarget.addEventListener("mouseup", onUp, true);
+  const priorCleanup = sidebarWorkspaceMenuCleanups.get(body);
+  sidebarWorkspaceMenuCleanups.set(body, () => {
+    priorCleanup?.();
+    listenerTarget.removeEventListener("mousemove", onMove, true);
+    listenerTarget.removeEventListener("mouseup", onUp, true);
+    dragging = false;
+    sidebarSectionResizing = false;
+    if (doc.body) doc.body.style.cursor = "";
+  });
+  return handle;
 }
 
 function fitSidebarShellToViewport(
@@ -1231,7 +1634,10 @@ function fitSidebarShellToViewport(
   const doc = body.ownerDocument;
   if (!doc) return;
   const view = doc.defaultView;
-  if (!view) return;
+  if (!view) {
+    applySidebarBoxHeight(body, shell, readSidebarSectionHeight());
+    return;
+  }
 
   const rect = body.getBoundingClientRect();
   const bottomInset = 8;
@@ -1239,13 +1645,22 @@ function fitSidebarShellToViewport(
   const available = Math.floor(
     view.innerHeight - Math.max(0, rect.top) - bottomInset,
   );
-  const targetHeight = Math.max(0, available);
-
-  body.style.height = `${targetHeight}px`;
-  body.style.minHeight = `${targetHeight}px`;
-  shell.style.height = `${targetHeight}px`;
-  shell.style.minHeight = `${targetHeight}px`;
-  shell.style.maxHeight = `${targetHeight}px`;
+  if (sidebarSectionResizing) return;
+  const notLaidOut = rect.width < 1 && rect.height < 1;
+  const canFill =
+    !notLaidOut &&
+    !sidebarPaneIsStacked(body) &&
+    available >= 200 &&
+    view.innerHeight >= 200;
+  // A stacked reader section keeps the saved height. Filling from rect.top
+  // writes 0 when the section is not the viewport yet, and overflow:hidden
+  // then clips the tab row.
+  syncSidebarResizeHandle(shell, !canFill);
+  applySidebarBoxHeight(
+    body,
+    shell,
+    canFill ? available : readSidebarSectionHeight(),
+  );
 }
 
 function bindSidebarWheelTrap(shell: HTMLElement): void {
@@ -1316,6 +1731,7 @@ function canElementScrollVertically(
 }
 
 function cleanupSidebarWorkspace(body: HTMLElement): void {
+  sidebarSectionResizing = false;
   const previousObserver = sidebarWorkspaceResizeObservers.get(body);
   if (previousObserver) {
     previousObserver.disconnect();
@@ -1339,10 +1755,21 @@ function cleanupSidebarWorkspace(body: HTMLElement): void {
 }
 
 function ensureSidebarWorkspaceStyles(doc: Document): void {
-  if (doc.getElementById("ai-butler-sidebar-workspace-styles")) return;
+  const existing = doc.getElementById("ai-butler-sidebar-workspace-styles");
+  if (
+    existing?.getAttribute("data-ai-butler-layout") ===
+    SIDEBAR_LAYOUT_GENERATION
+  ) {
+    return;
+  }
+  existing?.remove();
 
-  const style = doc.createElement("style");
+  const style = doc.createElementNS(
+    "http://www.w3.org/1999/xhtml",
+    "style",
+  ) as HTMLStyleElement;
   style.id = "ai-butler-sidebar-workspace-styles";
+  style.setAttribute("data-ai-butler-layout", SIDEBAR_LAYOUT_GENERATION);
   style.textContent = `
     .ai-butler-sidebar-shell,
     .ai-butler-sidebar-shell * {
@@ -1350,29 +1777,28 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     }
 
     .ai-butler-sidebar-shell {
-      --ai-butler-accent: #59c0bc;
-      --ai-butler-border: rgba(88, 166, 205, 0.16);
-      --ai-butler-soft-border: rgba(88, 166, 205, 0.1);
-      --ai-butler-muted: rgba(96, 108, 122, 0.72);
-      --ai-butler-surface: rgba(255, 255, 255, 0.78);
-      --ai-butler-surface-strong: rgba(242, 249, 253, 0.86);
-      --ai-butler-blue-bg: #f8fcff;
+      --ai-butler-accent: #fff;
+      --ai-butler-border: rgba(255, 255, 255, 0.18);
+      --ai-butler-soft-border: rgba(255, 255, 255, 0.12);
+      --ai-butler-muted: rgba(255, 255, 255, 0.72);
+      --ai-butler-surface: #000;
+      --ai-butler-surface-strong: #000;
+      --ai-butler-blue-bg: #000;
       display: flex;
       flex-direction: column;
       width: 100%;
       max-width: 100%;
       min-width: 0;
-      height: 100%;
-      min-height: 0;
+      flex: 1 1 auto;
+      height: auto;
+      min-height: ${SIDEBAR_STACKED_MIN_HEIGHT}px;
       overflow: hidden;
       overscroll-behavior: contain;
-      border: 1px solid rgba(91, 174, 216, 0.16);
-      border-bottom-color: rgba(128, 128, 128, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-bottom-color: rgba(255, 255, 255, 0.16);
       border-radius: 14px 14px 0 0;
-      background:
-        linear-gradient(180deg, rgba(240, 249, 255, 0.82), rgba(250, 253, 255, 0.78) 82px, rgba(255, 255, 255, 0.62)),
-        var(--ai-butler-blue-bg);
-      color: inherit;
+      background: #000 !important;
+      color: #fff !important;
     }
 
     .ai-butler-sidebar-topbar {
@@ -1383,6 +1809,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       padding: 10px 10px 8px;
       border-bottom: 1px solid var(--ai-butler-soft-border);
       flex: 0 0 auto;
+      background: #000;
+      color: #fff;
     }
 
     .ai-butler-sidebar-title-wrap {
@@ -1416,8 +1844,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       justify-content: center;
       border: 1px solid var(--ai-butler-border);
       border-radius: 9px;
-      background: rgba(128, 128, 128, 0.045);
-      color: inherit;
+      background: #000;
+      color: #fff;
       cursor: pointer;
       font-size: 15px;
       line-height: 1;
@@ -1439,7 +1867,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       width: 30px;
       height: 30px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.72);
+      background: #000;
+      color: #fff;
     }
 
     .ai-butler-sidebar-tabs {
@@ -1450,9 +1879,10 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       min-width: 0;
       width: 100%;
       padding: 8px 10px;
-      border-bottom: 1px solid rgba(91, 174, 216, 0.12);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.16);
       border-radius: 14px 14px 0 0;
-      background: rgba(247, 252, 255, 0.82);
+      background: #000;
+      color: #fff;
       overflow: visible;
       flex: 0 0 auto;
     }
@@ -1468,7 +1898,7 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       border: 1px solid transparent;
       border-radius: 999px;
       background: transparent;
-      color: inherit;
+      color: #fff;
       cursor: pointer;
       font: inherit;
       font-size: 12px;
@@ -1517,8 +1947,8 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       padding: 5px;
       border: 1px solid var(--ai-butler-border);
       border-radius: 10px;
-      background: rgba(250, 250, 250, 0.98);
-      color: #1f2933;
+      background: #000;
+      color: #fff;
       box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
     }
 
@@ -1545,14 +1975,62 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     }
 
     .ai-butler-sidebar-content {
+      display: flex;
+      flex-direction: column;
       flex: 1 1 auto;
-      min-height: 0;
+      min-height: 240px;
       width: 100%;
       max-width: 100%;
       overflow: hidden;
       overscroll-behavior: contain;
       padding: 0;
       scrollbar-width: thin;
+      background: #000;
+      color: #fff;
+    }
+
+    .ai-butler-sidebar-tab-panel {
+      display: none;
+    }
+
+    .ai-butler-sidebar-shell .ai-butler-sidebar-tab-panel.is-active {
+      display: flex;
+      min-height: 240px;
+    }
+
+    .ai-butler-sidebar-job {
+      display: none;
+      flex: 0 0 auto;
+      box-sizing: border-box;
+      width: 100%;
+      padding: 8px 10px 6px;
+      background: #000;
+      color: #fff;
+    }
+
+    .ai-butler-sidebar-job.is-active {
+      display: block;
+    }
+
+    .ai-butler-sidebar-job-label {
+      margin: 0 0 4px;
+      color: #fff;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .ai-butler-sidebar-job-track {
+      height: 6px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    .ai-butler-sidebar-job-fill {
+      height: 100%;
+      width: 0;
+      border-radius: 999px;
+      background: #fff;
     }
 
     .ai-butler-sidebar-tab-panel {
@@ -1561,6 +2039,7 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       min-width: 0;
       min-height: 0;
       height: 100%;
+      flex: 1 1 auto;
       flex-direction: column;
       overflow: hidden;
       overscroll-behavior: contain;
@@ -1581,6 +2060,25 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       overscroll-behavior: contain;
     }
 
+    .ai-butler-sidebar-tab-panel[data-tab-id="chat"] {
+      flex: 1 1 auto;
+      height: 100%;
+      min-height: 0;
+      padding: 0;
+      background: #000;
+      color: #fff;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="chat"] > #ai-butler-inline-chat {
+      flex: 1 1 auto;
+      height: 100%;
+      min-height: 0;
+      max-height: none;
+      border: none;
+      border-radius: 0;
+      margin: 0;
+    }
+
     .ai-butler-sidebar-tab-panel[data-tab-id="quickRead"] {
       overflow-y: auto;
       overflow-x: hidden;
@@ -1590,6 +2088,65 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     .ai-butler-sidebar-tab-panel[data-tab-id="summary"],
     .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] {
       padding: 0;
+      background: #000;
+      color: #fff;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .ai-butler-note-section,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .ai-butler-note-section,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .ai-butler-note-header,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .ai-butler-note-header,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .ai-butler-note-content-wrapper,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .ai-butler-note-content-wrapper,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .markdown-body,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .markdown-body,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] pre,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] pre,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] code,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] code,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] table,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] table,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] th,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] th,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] td,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] td,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] blockquote,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] blockquote {
+      background: #000 !important;
+      background-color: #000 !important;
+      color: #fff !important;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex *,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex * {
+      max-width: none !important;
+      overflow-wrap: normal !important;
+      word-break: normal !important;
+      white-space: nowrap !important;
+      color: #fff !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      box-sizing: content-box;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex .vlist-s,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex .vlist-s {
+      min-width: 2px;
+      width: 2px;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex-mathml,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex-mathml {
+      position: absolute !important;
+      clip: rect(1px, 1px, 1px, 1px) !important;
+      clip-path: inset(50%) !important;
+      height: 1px !important;
+      width: 1px !important;
+      overflow: hidden !important;
+      padding: 0 !important;
+      border: 0 !important;
     }
 
     .ai-butler-sidebar-chat-entry {
@@ -1614,13 +2171,34 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       line-height: 1.35;
     }
 
+    .ai-butler-sidebar-resize {
+      flex: 0 0 auto;
+      height: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: ns-resize;
+      background: #000;
+      color: #fff;
+      border-top: 1px solid rgba(255, 255, 255, 0.28);
+      user-select: none;
+      touch-action: none;
+    }
+
+    .ai-butler-sidebar-resize-grip {
+      width: 42px;
+      height: 3px;
+      border-radius: 999px;
+      background: #fff;
+    }
+
     .ai-butler-sidebar-empty {
       min-height: 180px;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 18px;
-      color: rgba(128, 128, 128, 0.85);
+      color: #fff;
       font-size: 12px;
       text-align: center;
     }
@@ -1634,38 +2212,6 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       }
     }
 
-    @media (prefers-color-scheme: dark) {
-      .ai-butler-sidebar-shell {
-        --ai-butler-accent: #71d7d2;
-        --ai-butler-border: rgba(112, 184, 214, 0.2);
-        --ai-butler-soft-border: rgba(112, 184, 214, 0.14);
-        --ai-butler-muted: rgba(203, 213, 225, 0.64);
-        --ai-butler-surface: rgba(15, 23, 42, 0.42);
-        --ai-butler-surface-strong: rgba(20, 34, 48, 0.62);
-        --ai-butler-blue-bg: #111820;
-        border-color: rgba(112, 184, 214, 0.18);
-        border-bottom-color: rgba(148, 163, 184, 0.12);
-        background:
-          linear-gradient(180deg, rgba(17, 33, 45, 0.72), rgba(15, 23, 42, 0.58) 86px, rgba(15, 23, 42, 0.38)),
-          var(--ai-butler-blue-bg);
-      }
-
-      .ai-butler-sidebar-tabs {
-        border-bottom-color: rgba(112, 184, 214, 0.14);
-        background: rgba(17, 31, 42, 0.78);
-      }
-
-      .ai-butler-sidebar-icon-button,
-      .ai-butler-sidebar-refresh {
-        background: rgba(15, 23, 42, 0.55);
-        border-color: rgba(148, 163, 184, 0.22);
-      }
-
-      .ai-butler-sidebar-more-menu {
-        background: rgba(24, 31, 39, 0.98);
-        color: #f3f4f6;
-      }
-    }
   `;
   const styleHost = doc.head || doc.documentElement;
   if (styleHost) styleHost.appendChild(style);
@@ -1705,14 +2251,16 @@ function applySidebarTabOverflow(
   moreWrap.style.display = "none";
 
   const fits = (): boolean => nav.scrollWidth <= nav.clientWidth + 1;
+  // A not-yet-laid-out section reports 0 width and would hide every tab.
+  if (nav.clientWidth < 48) return;
   if (fits()) return;
 
   moreWrap.style.display = "block";
   const hidePriority: SidebarTabId[] = [
     "quickRead",
-    "summary",
-    "deepRead",
     "mindmap",
+    "deepRead",
+    "summary",
     "chat",
   ];
   const orderedTabs = hidePriority
@@ -1752,19 +2300,23 @@ function renderSidebarTabPanel(
   panel: HTMLElement,
   doc: Document,
   item: Zotero.Item,
-  handleOpenAIChat: (itemId: number) => Promise<void>,
+  _handleOpenAIChat: (itemId: number) => Promise<void>,
 ): void {
+  if (renderedSidebarPanels.has(panel)) return;
+  renderedSidebarPanels.add(panel);
+  if (tabId === "summary" || tabId === "deepRead" || tabId === "mindmap") {
+    panel.appendChild(createSidebarJobProgress(doc, tabId));
+    const snap = sidebarJobSnapshot.get(tabId);
+    if (snap) {
+      paintSidebarJobProgress(tabId, snap.progress, snap.message, snap.failed);
+    }
+  }
   switch (tabId) {
     case "summary":
       renderNoteSection(panel, doc, item, "summary", { mode: "page" });
       break;
     case "chat":
-      if (isSidebarModuleEnabled("actionButtons")) {
-        renderFullChatEntry(panel, doc, item, handleOpenAIChat);
-      }
-      if (isSidebarModuleEnabled("quickChat")) {
-        renderChatArea(panel, doc, item, true, { mode: "page" });
-      }
+      renderChatArea(panel, doc, item, true, { mode: "page" });
       break;
     case "deepRead":
       renderNoteSection(panel, doc, item, "deepRead", { mode: "page" });
@@ -1784,40 +2336,15 @@ function renderSidebarTabPanel(
       }
       break;
   }
-}
-
-function renderFullChatEntry(
-  body: HTMLElement,
-  doc: Document,
-  item: Zotero.Item,
-  handleOpenAIChat: (itemId: number) => Promise<void>,
-): void {
-  const entry = doc.createElement("div");
-  entry.className = "ai-butler-sidebar-chat-entry";
-
-  const meta = doc.createElement("div");
-  meta.className = "ai-butler-sidebar-chat-entry-title";
-  const metaText = doc.createElement("span");
-  metaText.textContent = getString("itempane-ai-open-chat-tooltip");
-  meta.appendChild(metaText);
-
-  const fullChatBtn = createButton(
-    doc,
-    getString("itempane-ai-open-chat"),
-    true,
-  );
-  fullChatBtn.style.flex = "0 0 auto";
-  fullChatBtn.addEventListener("click", async () => {
-    try {
-      await handleOpenAIChat(item.id);
-    } catch (error: any) {
-      ztoolkit.log("[AI-Butler] 完整追问按钮点击失败:", error);
-    }
-  });
-
-  entry.appendChild(meta);
-  entry.appendChild(fullChatBtn);
-  body.appendChild(entry);
+  if (tabId === "summary" || tabId === "deepRead" || tabId === "mindmap") {
+    const itemId = item.id;
+    const refresh = (): void => {
+      if (sidebarRenderContext?.itemId !== itemId) return;
+      void refreshSidebarJobProgress();
+    };
+    if (doc.defaultView) doc.defaultView.setTimeout(refresh, 0);
+    else setTimeout(refresh, 0);
+  }
 }
 
 /**
@@ -2026,6 +2553,308 @@ type SidebarNoteRenderOptions = {
 /**
  * 渲染 AI 笔记区域
  */
+async function resolveSidebarParentItem(
+  item: Zotero.Item,
+): Promise<Zotero.Item> {
+  if (item.isAttachment?.()) {
+    const parentId = item.parentItemID;
+    if (parentId) {
+      const parent = await Zotero.Items.getAsync(parentId);
+      if (parent) return parent;
+    }
+  }
+  return item;
+}
+
+type SidebarJobKind = "summary" | "deepRead" | "mindmap";
+
+const sidebarJobMessages = new Map<string, string>();
+const sidebarJobClosed = new Set<string>();
+const sidebarJobSnapshot = new Map<
+  SidebarJobKind,
+  { progress: number; message: string; failed: boolean }
+>();
+
+function forgetClosedSidebarJob(kind: SidebarJobKind): void {
+  for (const taskId of Array.from(sidebarJobClosed)) {
+    if (parseTaskTarget(taskId)?.target === kind) {
+      sidebarJobClosed.delete(taskId);
+    }
+  }
+}
+
+function closeSidebarJob(kind: SidebarJobKind, taskId: string): void {
+  if (sidebarJobClosed.has(taskId)) return;
+  sidebarJobClosed.add(taskId);
+  sidebarJobMessages.delete(taskId);
+  sidebarJobSnapshot.delete(kind);
+  hideSidebarJobProgress(kind);
+  scheduleSidebarRefresh(kind);
+}
+
+function isSidebarJobTarget(
+  target: SidebarAutoRefreshTarget,
+): target is SidebarJobKind {
+  return target === "summary" || target === "deepRead" || target === "mindmap";
+}
+
+function sidebarJobKindFromTask(task: {
+  taskType?: string;
+}): SidebarJobKind | null {
+  const type = task.taskType || "summary";
+  if (type === "summary" || type === "deepRead" || type === "mindmap") {
+    return type;
+  }
+  return null;
+}
+
+function sidebarJobLabel(kind: SidebarJobKind): string {
+  if (kind === "deepRead") return getString("itempane-tab-deep-read");
+  if (kind === "mindmap") return getString("itempane-tab-mindmap");
+  return getString("itempane-tab-summary");
+}
+
+function sidebarContextItemIds(): number[] {
+  if (!sidebarContext) return [];
+  const ids = [sidebarContext.itemId];
+  const parentId = sidebarContext.item.parentItemID;
+  if (typeof parentId === "number" && parentId > 0 && !ids.includes(parentId)) {
+    ids.push(parentId);
+  }
+  return ids;
+}
+
+function sidebarJobHost(kind: SidebarJobKind): HTMLElement | null {
+  return sidebarQueryById(`ai-butler-sidebar-job-${kind}`);
+}
+
+function hideSidebarJobProgress(kind: SidebarJobKind): void {
+  sidebarJobSnapshot.delete(kind);
+  const host = sidebarJobHost(kind);
+  host?.classList.remove("is-active");
+  if (host) host.style.display = "none";
+}
+
+function pinSidebarJobTab(kind: SidebarJobKind): void {
+  sidebarActiveTabId = kind;
+  setPref("sidebarActiveTab", kind);
+  showSidebarTab?.(kind);
+}
+
+function paintSidebarJobProgress(
+  kind: SidebarJobKind | null,
+  progress: number,
+  message: string,
+  failed = false,
+): void {
+  if (!kind) {
+    hideSidebarJobProgress("summary");
+    hideSidebarJobProgress("deepRead");
+    hideSidebarJobProgress("mindmap");
+    return;
+  }
+  sidebarJobSnapshot.set(kind, { progress, message, failed });
+  const host = sidebarJobHost(kind);
+  if (!host) return;
+  const label = host.querySelector(
+    ".ai-butler-sidebar-job-label",
+  ) as HTMLElement | null;
+  const fill = host.querySelector(
+    ".ai-butler-sidebar-job-fill",
+  ) as HTMLElement | null;
+  host.classList.add("is-active");
+  host.style.display = "block";
+  const clamped = Math.max(0, Math.min(100, Math.round(progress)));
+  if (label) {
+    label.textContent = getString("itempane-sidebar-job-progress", {
+      args: {
+        kind: sidebarJobLabel(kind),
+        message: message || getString("itempane-sidebar-job-queued"),
+      },
+    });
+  }
+  if (fill) {
+    fill.style.width = `${clamped}%`;
+    fill.style.background = failed ? "#e57373" : "#fff";
+  }
+  host.setAttribute("aria-valuenow", String(clamped));
+}
+
+function createSidebarJobProgress(
+  doc: Document,
+  kind: SidebarJobKind,
+): HTMLElement {
+  const host = doc.createElement("div");
+  host.id = `ai-butler-sidebar-job-${kind}`;
+  host.className = "ai-butler-sidebar-job";
+  host.dataset.jobKind = kind;
+  host.style.flex = "0 0 auto";
+  host.style.display = "none";
+  host.setAttribute("role", "progressbar");
+  host.setAttribute("aria-valuemin", "0");
+  host.setAttribute("aria-valuemax", "100");
+  host.setAttribute("aria-valuenow", "0");
+  const label = doc.createElement("div");
+  label.className = "ai-butler-sidebar-job-label";
+  const track = doc.createElement("div");
+  track.className = "ai-butler-sidebar-job-track";
+  const fill = doc.createElement("div");
+  fill.className = "ai-butler-sidebar-job-fill";
+  track.appendChild(fill);
+  host.appendChild(label);
+  host.appendChild(track);
+  return host;
+}
+
+async function refreshSidebarJobProgress(): Promise<void> {
+  const kinds: SidebarJobKind[] = ["summary", "deepRead", "mindmap"];
+  const ids = sidebarContextItemIds();
+  if (!ids.length) {
+    for (const kind of kinds) hideSidebarJobProgress(kind);
+    return;
+  }
+  const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
+  const active = TaskQueueManager.getInstance()
+    .getAllTasks()
+    .filter((task) => {
+      const kind = sidebarJobKindFromTask(task);
+      return (
+        !!kind &&
+        ids.includes(task.itemId) &&
+        (task.status === TaskStatus.PENDING ||
+          task.status === TaskStatus.PRIORITY ||
+          task.status === TaskStatus.PROCESSING)
+      );
+    });
+  for (const kind of kinds) {
+    const matches = active.filter(
+      (task) => sidebarJobKindFromTask(task) === kind,
+    );
+    const current =
+      matches.find((task) => task.status === TaskStatus.PROCESSING) ||
+      matches[0];
+    if (!current) {
+      hideSidebarJobProgress(kind);
+      continue;
+    }
+    paintSidebarJobProgress(
+      kind,
+      current.progress || 0,
+      sidebarJobMessages.get(current.id) || current.workflowStage || "",
+    );
+  }
+}
+
+async function enqueueSidebarJob(
+  doc: Document,
+  button: HTMLButtonElement,
+  item: Zotero.Item,
+  kind: SidebarJobKind,
+): Promise<void> {
+  pinSidebarJobTab(kind);
+  forgetClosedSidebarJob(kind);
+  const target = await resolveSidebarParentItem(item);
+  const { TaskArtifacts } = await import("./taskArtifacts");
+  const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
+  const queue = TaskQueueManager.getInstance();
+  const running = queue.getAllTasks().find((task) => {
+    return (
+      task.itemId === target.id &&
+      sidebarJobKindFromTask(task) === kind &&
+      (task.status === TaskStatus.PENDING ||
+        task.status === TaskStatus.PRIORITY ||
+        task.status === TaskStatus.PROCESSING)
+    );
+  });
+  if (running) {
+    paintSidebarJobProgress(
+      kind,
+      running.progress || 0,
+      sidebarJobMessages.get(running.id) ||
+        running.workflowStage ||
+        getString("itempane-sidebar-job-queued"),
+    );
+    return;
+  }
+
+  const probe = await TaskArtifacts.probe(kind, target);
+  if (probe.exists) {
+    const confirmed = Services.prompt.confirm(
+      (doc.defaultView || Zotero.getMainWindow()) as any,
+      getString("itempane-regenerate-confirm-title"),
+      getString("itempane-regenerate-confirm-message", {
+        args: { kind: sidebarJobLabel(kind) },
+      }),
+    );
+    if (!confirmed) return;
+  }
+
+  button.disabled = true;
+  button.textContent = getString("itempane-adding-to-queue");
+  const options = probe.exists ? { forceOverwrite: true } : undefined;
+  if (kind === "deepRead") {
+    await queue.addDeepReadTask(target, true, options);
+  } else if (kind === "mindmap") {
+    await queue.addMindmapTask(target, true, options);
+  } else {
+    await queue.addTask(target, true, options);
+  }
+  pinSidebarJobTab(kind);
+  paintSidebarJobProgress(kind, 0, getString("itempane-sidebar-job-queued"));
+  button.textContent = getString("itempane-added-to-queue");
+}
+
+function sidebarGenerateLabel(noteKind: AiNoteKind): string {
+  return noteKind === "deepRead"
+    ? getString("itempane-generate-deep-read")
+    : getString("itempane-generate-summary");
+}
+
+function createSidebarGenerateButton(
+  doc: Document,
+  item: Zotero.Item,
+  noteKind: AiNoteKind,
+): HTMLButtonElement {
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.className = "ai-butler-sidebar-generate";
+  button.textContent = sidebarGenerateLabel(noteKind);
+  button.title = sidebarGenerateLabel(noteKind);
+  button.style.cssText = `
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    border-radius: 4px;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+  `;
+  button.addEventListener("click", async (event: Event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const idleLabel = sidebarGenerateLabel(noteKind);
+    try {
+      await enqueueSidebarJob(
+        doc,
+        button,
+        item,
+        noteKind === "deepRead" ? "deepRead" : "summary",
+      );
+    } catch {
+      button.textContent = getString("itempane-failed");
+      setTimeout(() => {
+        button.textContent = idleLabel;
+        button.disabled = false;
+      }, 2000);
+    }
+  });
+  return button;
+}
+
 function renderNoteSection(
   body: HTMLElement,
   doc: Document,
@@ -2042,7 +2871,8 @@ function renderNoteSection(
     ? `
     display: flex;
     flex-direction: column;
-    height: 100%;
+    flex: 1 1 auto;
+    height: auto;
     min-height: 0;
     overflow: hidden;
     width: 100%;
@@ -2464,6 +3294,10 @@ function renderNoteSection(
     });
     return btn;
   };
+
+  if (noteKind === "summary" || noteKind === "deepRead") {
+    mainControls.appendChild(createSidebarGenerateButton(doc, item, noteKind));
+  }
 
   const editBtn = createNoteActionBtn(
     "✏️",
@@ -3190,7 +4024,7 @@ function renderMindmapSection(
     ? `
     flex: 1 1 auto;
     min-height: 0;
-    height: 100%;
+    height: auto;
     margin: 0;
     display: flex;
     flex-direction: column;
@@ -3245,7 +4079,39 @@ function renderMindmapSection(
     transition: transform 0.2s ease;
   `;
 
+  const mindmapGenerateBtn = doc.createElement("button");
+  mindmapGenerateBtn.type = "button";
+  mindmapGenerateBtn.textContent = getString("itempane-generate-mindmap");
+  mindmapGenerateBtn.style.cssText = `
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    border-radius: 4px;
+    background: #000;
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+  `;
+  mindmapGenerateBtn.addEventListener("click", async (event: Event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const idleLabel = getString("itempane-generate-mindmap");
+    try {
+      await enqueueSidebarJob(doc, mindmapGenerateBtn, item, "mindmap");
+    } catch {
+      mindmapGenerateBtn.textContent = getString("itempane-failed");
+      setTimeout(() => {
+        mindmapGenerateBtn.textContent = idleLabel;
+        mindmapGenerateBtn.disabled = false;
+      }, 2000);
+    }
+  });
+
   mindmapHeader.appendChild(mindmapTitle);
+  mindmapHeader.appendChild(mindmapGenerateBtn);
   mindmapHeader.appendChild(mindmapToggleIcon);
 
   // 思维导图容器
@@ -3323,7 +4189,18 @@ async function loadMindmapContent(
   options: { mode?: "card" | "page" } = {},
 ): Promise<void> {
   const isPageMode = options.mode === "page";
+  const loadKey = `mindmap:${item.id}`;
+  const loadSerial = beginSidebarContentLoad(loadKey);
+  const mindmapWriteIsCurrent = (): boolean =>
+    sidebarContentLoadIsCurrent(loadKey, loadSerial) &&
+    container.isConnected !== false;
   try {
+    await new Promise<void>((resolve) => {
+      const view = doc.defaultView;
+      if (view) view.setTimeout(resolve, 0);
+      else setTimeout(resolve, 0);
+    });
+    if (!mindmapWriteIsCurrent()) return;
     // Avoid accumulating message listeners across re-renders/refreshes
     const mindmapWin: any = doc.defaultView;
     if (mindmapWin?.__aiButlerMindmapMessageHandler) {
@@ -3399,26 +4276,24 @@ async function loadMindmapContent(
         generateMindmapBtn.style.background = "transparent";
       });
       generateMindmapBtn.addEventListener("click", async () => {
+        const idleLabel = getString("itempane-generate-mindmap");
         try {
-          generateMindmapBtn.disabled = true;
-          generateMindmapBtn.textContent = getString(
-            "itempane-adding-to-queue",
+          await enqueueSidebarJob(
+            doc,
+            generateMindmapBtn,
+            targetItem,
+            "mindmap",
           );
-          const { TaskQueueManager } = await import("./taskQueue");
-          const queueManager = TaskQueueManager.getInstance();
-          await queueManager.addMindmapTask(targetItem);
-          generateMindmapBtn.textContent = getString("itempane-added-to-queue");
-        } catch (err: any) {
+        } catch {
           generateMindmapBtn.textContent = getString("itempane-failed");
           setTimeout(() => {
-            generateMindmapBtn.textContent = getString(
-              "itempane-generate-mindmap",
-            );
+            generateMindmapBtn.textContent = idleLabel;
             generateMindmapBtn.disabled = false;
           }, 2000);
         }
       });
 
+      if (!mindmapWriteIsCurrent()) return;
       container.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
           <div style="font-size: 24px; margin-bottom: 8px;">🧠</div>
@@ -3462,6 +4337,7 @@ async function loadMindmapContent(
     }
 
     if (!match) {
+      if (!mindmapWriteIsCurrent()) return;
       container.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
           <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
@@ -3478,6 +4354,7 @@ async function loadMindmapContent(
     );
 
     if (!markdownContent.trim()) {
+      if (!mindmapWriteIsCurrent()) return;
       container.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
           <div style="font-size: 24px; margin-bottom: 8px;">📄</div>
@@ -3487,6 +4364,7 @@ async function loadMindmapContent(
       return;
     }
 
+    if (!mindmapWriteIsCurrent()) return;
     // 清空容器
     container.innerHTML = "";
 
@@ -3734,6 +4612,7 @@ async function loadMindmapContent(
     } catch (renderError: any) {
       ztoolkit.log("[AI-Butler] 思维导图渲染失败:", renderError);
 
+      if (!mindmapWriteIsCurrent()) return;
       // 回退显示格式化的 Markdown
       container.innerHTML = `
         <div style="text-align: left; padding: 15px; font-size: 12px; background: #fff; border-radius: 8px; overflow: auto; max-height: 400px; white-space: pre-wrap; font-family: monospace; line-height: 1.6;">${markdownContent.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
@@ -3741,6 +4620,7 @@ async function loadMindmapContent(
     }
   } catch (err: any) {
     ztoolkit.log("[AI-Butler] 加载思维导图失败:", err);
+    if (!mindmapWriteIsCurrent()) return;
     container.innerHTML = `<div style="color: #d32f2f; padding: 10px;">${getString("itempane-mindmap-load-failed", { args: { message: escapeHtmlForChat(err.message) } })}</div>`;
   }
 }
@@ -3750,12 +4630,25 @@ async function loadMindmapContent(
 
  */
 async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
-  if (doc.getElementById("ai-butler-quick-chat-katex-style")) return;
+  const styleId = "ai-butler-quick-chat-katex-style";
+  const existing = doc.getElementById(styleId);
+  if (
+    existing?.getAttribute("data-ai-butler-layout") ===
+    SIDEBAR_LAYOUT_GENERATION
+  ) {
+    return;
+  }
+  existing?.remove();
   try {
     const { themeManager } = await import("./themeManager");
     const katexCss = await themeManager.loadKatexCss();
-    const styleEl = doc.createElement("style");
-    styleEl.id = "ai-butler-quick-chat-katex-style";
+    // XUL style nodes do not apply to the HTML KaTeX tree, which leaves formulas unstyled.
+    const styleEl = doc.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "style",
+    ) as HTMLStyleElement;
+    styleEl.id = styleId;
+    styleEl.setAttribute("data-ai-butler-layout", SIDEBAR_LAYOUT_GENERATION);
     styleEl.textContent = `${katexCss}
 #ai-butler-inline-chat,
 #ai-butler-inline-chat * {
@@ -3783,11 +4676,13 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   overflow-x: hidden;
   contain: inline-size;
 }
+#ai-butler-inline-chat .ai-butler-quick-chat-assistant {
+  text-align: left;
+}
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant,
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant * {
   min-width: 0;
   max-width: 100%;
-  text-align: left;
   overflow-wrap: anywhere;
   word-break: break-word;
   white-space: normal;
@@ -3799,6 +4694,46 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   overflow-wrap: normal !important;
   word-break: normal !important;
   white-space: nowrap !important;
+  color: #fff !important;
+}
+#ai-butler-inline-chat,
+#ai-butler-inline-chat .ai-butler-quick-chat-messages,
+#ai-butler-inline-chat .ai-butler-quick-chat-pair,
+#ai-butler-inline-chat .ai-butler-quick-chat-user,
+#ai-butler-inline-chat .ai-butler-quick-chat-assistant,
+#ai-butler-inline-chat .markdown-body,
+#ai-butler-inline-chat pre,
+#ai-butler-inline-chat code,
+#ai-butler-inline-chat kbd,
+#ai-butler-inline-chat samp,
+#ai-butler-inline-chat table,
+#ai-butler-inline-chat thead,
+#ai-butler-inline-chat tr,
+#ai-butler-inline-chat th,
+#ai-butler-inline-chat td,
+#ai-butler-inline-chat blockquote {
+  background: #000 !important;
+  background-color: #000 !important;
+  color: #fff !important;
+}
+#ai-butler-inline-chat textarea,
+#ai-butler-inline-chat select {
+  background: #000 !important;
+  color: #fff !important;
+}
+#ai-butler-inline-chat .katex,
+#ai-butler-inline-chat .katex-display,
+#ai-butler-inline-chat .katex-html,
+#ai-butler-inline-chat .katex * {
+  color: #fff !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  /* Do not inherit the chat's border-box. KaTeX struts and scripts assume content-box. */
+  box-sizing: content-box;
+}
+#ai-butler-inline-chat .katex .vlist-s {
+  min-width: 2px;
+  width: 2px;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant p {
   margin: 0.35em 0;
@@ -3816,13 +4751,13 @@ async function ensureQuickChatKatexCss(doc: Document): Promise<void> {
   margin: 0.9em 0 0.55em;
   line-height: 1.35;
   font-weight: 700;
-  color: inherit;
+  color: #fff !important;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant h1 {
   font-size: 1.2em;
   text-align: center;
   padding-bottom: 0.25em;
-  color: var(--main-10, inherit);
+  color: #fff !important;
 }
 #ai-butler-inline-chat .ai-butler-quick-chat-assistant h1::after {
   content: "";
@@ -3960,7 +4895,7 @@ function renderChatArea(
   doc: Document,
   item: Zotero.Item,
   initiallyVisible = false,
-  options: { mode?: "card" | "page" } = {},
+  options: { mode?: "card" | "page"; onOpenWindow?: () => void } = {},
 ): void {
   const isPageMode = options.mode === "page";
   const existingChat = body.querySelector("#ai-butler-inline-chat");
@@ -4005,12 +4940,13 @@ function renderChatArea(
     max-inline-size: 100%;
     min-width: 0;
     min-inline-size: 0;
-    ${isPageMode ? "min-height: 0; flex: 1 1 auto;" : ""}
+    ${isPageMode ? "height: 100%; min-height: 0; flex: 1 1 auto;" : ""}
     contain: inline-size;
-    border: 1px solid rgba(89, 192, 188, 0.22);
-    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: ${isPageMode ? "0" : "10px"};
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.72);
+    background: #000;
+    color: #fff;
     margin-bottom: ${isPageMode ? "0" : "12px"};
   `;
 
@@ -4019,9 +4955,11 @@ function renderChatArea(
     display: flex;
     align-items: center;
     gap: 6px;
+    flex: 0 0 auto;
     padding: 8px 10px;
-    background: rgba(89, 192, 188, 0.1);
-    border-bottom: 1px solid rgba(89, 192, 188, 0.2);
+    background: #000;
+    color: #fff;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
     font-size: 12px;
     font-weight: 500;
   `;
@@ -4110,14 +5048,14 @@ function renderChatArea(
   threadSelect.id = "ai-butler-chat-thread-select";
   threadSelect.title = getString("itempane-quick-chat-thread-switch");
   threadSelect.style.cssText = `
-    max-width: 120px;
-    height: 20px;
-    font-size: 10px;
-    border: 1px solid currentColor;
+    max-width: ${isPageMode ? "180px" : "120px"};
+    height: ${isPageMode ? "26px" : "20px"};
+    font-size: ${isPageMode ? "12px" : "10px"};
+    border: 1px solid rgba(255, 255, 255, 0.28);
     border-radius: 3px;
-    background: transparent;
-    color: inherit;
-    opacity: 0.85;
+    background: #000;
+    color: #fff;
+    opacity: 1;
   `;
   const newThreadBtn = createQuickControlButton(
     getString("itempane-quick-chat-thread-new"),
@@ -4146,6 +5084,16 @@ function renderChatArea(
     "A+",
     getString("itempane-quick-chat-increase-font"),
   );
+  if (options.onOpenWindow) {
+    const openWindowBtn = createQuickControlButton(
+      "↗",
+      getString("itempane-ai-open-chat"),
+    );
+    openWindowBtn.addEventListener("click", () => {
+      options.onOpenWindow?.();
+    });
+    chatControls.appendChild(openWindowBtn);
+  }
   chatControls.appendChild(threadSelect);
   chatControls.appendChild(newThreadBtn);
   chatControls.appendChild(deleteThreadBtn);
@@ -4158,9 +5106,12 @@ function renderChatArea(
   // 消息显示区
   const messagesArea = doc.createElement("div");
   messagesArea.className = "ai-butler-quick-chat-messages";
+  // Page mode fills the sidebar and main Chat panes. The 200px height pref is card-only.
   messagesArea.style.cssText = `
     height: ${isPageMode ? "auto" : `${currentQuickChatHeight}px`};
     ${isPageMode ? "flex: 1 1 auto;" : ""}
+    color: #fff;
+    background: #000;
     width: 100%;
     inline-size: 100%;
     max-width: 100%;
@@ -4180,6 +5131,7 @@ function renderChatArea(
   `;
 
   let quickChatBindGeneration = 0;
+  let persistedRenderGeneration = 0;
 
   const syncQuickChatThreadControls = (): void => {
     const busy = currentChatState.isChatting;
@@ -4193,15 +5145,28 @@ function renderChatArea(
   const renderPersistedMessages = (
     messages: Array<{ role: string; content: string }>,
   ): void => {
-    if (!messagesArea.isConnected || currentChatState.itemId !== item.id) {
+    const renderGeneration = ++persistedRenderGeneration;
+    const bindGeneration = quickChatBindGeneration;
+    const requestItemId = item.id;
+    const stillCurrent = (): boolean =>
+      renderGeneration === persistedRenderGeneration &&
+      bindGeneration === quickChatBindGeneration &&
+      messagesArea.isConnected &&
+      currentChatState.itemId === requestItemId;
+    if (
+      !messagesArea.isConnected ||
+      currentChatState.itemId !== requestItemId
+    ) {
       return;
     }
     messagesArea.innerHTML = "";
     const list = Array.isArray(messages) ? messages : [];
     if (list.length === 0) {
-      messagesArea.innerHTML = `<div style="color: #777; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-thread-empty"))}</div>`;
+      messagesArea.innerHTML = `<div style="color: #fff; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-thread-empty"))}</div>`;
       return;
     }
+    const pairs: Array<{ question: string; answer: string; marker: number }> =
+      [];
     let index = 0;
     while (index < list.length) {
       const message = list[index];
@@ -4217,56 +5182,74 @@ function renderChatArea(
       } else {
         index += 1;
       }
-      const pairWrapper = doc.createElement("div");
-      pairWrapper.className = "ai-butler-quick-chat-pair";
-      pairWrapper.setAttribute("data-pair-id", `restored_${index}`);
-      pairWrapper.style.cssText = `
+      pairs.push({ question, answer, marker: index });
+    }
+    const paintPairs = (start: number): void => {
+      if (!stillCurrent()) return;
+      const end = Math.min(start + 2, pairs.length);
+      for (let pairIndex = start; pairIndex < end; pairIndex += 1) {
+        const pair = pairs[pairIndex];
+        const pairWrapper = doc.createElement("div");
+        pairWrapper.className = "ai-butler-quick-chat-pair";
+        pairWrapper.setAttribute("data-pair-id", `restored_${pair.marker}`);
+        pairWrapper.style.cssText = `
         width: 100%;
         max-width: 100%;
         min-width: 0;
         margin-bottom: 12px;
         padding: 8px;
-        border: 1px solid rgba(128, 128, 128, 0.2);
+        border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 8px;
         background: transparent;
+        color: #fff;
         user-select: text;
         cursor: text;
       `;
-      const userMsgDiv = doc.createElement("div");
-      userMsgDiv.className = "ai-butler-quick-chat-user";
-      userMsgDiv.style.cssText = `
+        const userMsgDiv = doc.createElement("div");
+        userMsgDiv.className = "ai-butler-quick-chat-user";
+        userMsgDiv.style.cssText = `
         margin-bottom: 8px;
         padding: 8px;
-        background: rgba(89, 192, 188, 0.1);
+        background: #000;
+        color: #fff;
         border-radius: 6px;
         border-left: 3px solid #59c0bc;
         user-select: text;
         overflow-wrap: anywhere;
         word-break: break-word;
       `;
-      userMsgDiv.innerHTML = `<strong>${getString("itempane-user-label")}</strong> ${escapeHtmlForChat(question)}`;
-      pairWrapper.appendChild(userMsgDiv);
-      if (answer) {
-        const aiMsgDiv = doc.createElement("div");
-        aiMsgDiv.className = "ai-butler-quick-chat-assistant";
-        aiMsgDiv.style.cssText = `
+        userMsgDiv.innerHTML = `<strong>${getString("itempane-user-label")}</strong> ${escapeHtmlForChat(pair.question)}`;
+        pairWrapper.appendChild(userMsgDiv);
+        if (pair.answer) {
+          const aiMsgDiv = doc.createElement("div");
+          aiMsgDiv.className = "ai-butler-quick-chat-assistant";
+          aiMsgDiv.style.cssText = `
           margin-bottom: 8px;
           padding: 8px;
-          background: rgba(128, 128, 128, 0.05);
+          background: #000;
+          color: #fff;
           border-radius: 6px;
-          border-left: 3px solid #667eea;
+          border-left: 3px solid #8ab4ff;
           width: 100%;
           max-width: 100%;
           min-width: 0;
           overflow-x: hidden;
           user-select: text;
         `;
-        updateQuickChatAssistantMessage(aiMsgDiv, answer);
-        pairWrapper.appendChild(aiMsgDiv);
+          updateQuickChatAssistantMessage(aiMsgDiv, pair.answer);
+          pairWrapper.appendChild(aiMsgDiv);
+        }
+        messagesArea.appendChild(pairWrapper);
       }
-      messagesArea.appendChild(pairWrapper);
-    }
-    messagesArea.scrollTop = messagesArea.scrollHeight;
+      if (end < pairs.length) {
+        const view = doc.defaultView;
+        if (view) view.setTimeout(() => paintPairs(end), 0);
+        else setTimeout(() => paintPairs(end), 0);
+        return;
+      }
+      messagesArea.scrollTop = messagesArea.scrollHeight;
+    };
+    paintPairs(0);
   };
 
   const refreshThreadSelect = (): void => {
@@ -4469,7 +5452,7 @@ function renderChatArea(
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 11px;
-    color: rgba(128, 128, 128, 0.9);
+    color: #fff;
   `;
 
   const createRelatedButton = (text: string, title?: string) => {
@@ -4535,10 +5518,7 @@ function renderChatArea(
 
   let quickChatPinnedToBottom = true;
 
-  const setRelatedStatus = (
-    message: string,
-    color = "rgba(128, 128, 128, 0.9)",
-  ): void => {
+  const setRelatedStatus = (message: string, color = "#fff"): void => {
     relatedStatus.textContent = message;
     relatedStatus.style.color = color;
   };
@@ -4651,7 +5631,7 @@ function renderChatArea(
       );
     }
     refreshThreadSelect();
-    messagesArea.innerHTML = `<div style="color: #777; text-align: center; padding: 10px;">${escapeHtmlForChat(message)}</div>`;
+    messagesArea.innerHTML = `<div style="color: #fff; text-align: center; padding: 10px;">${escapeHtmlForChat(message)}</div>`;
     quickChatPinnedToBottom = true;
     syncQuickChatThreadControls();
   }
@@ -4775,9 +5755,11 @@ function renderChatArea(
 
   const inputArea = doc.createElement("div");
   inputArea.style.cssText = `
+    flex: 0 0 auto;
     padding: 8px;
-    border-top: 1px solid rgba(128, 128, 128, 0.2);
-    background: rgba(128, 128, 128, 0.025);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    background: #000;
+    color: #fff;
   `;
 
   const composer = doc.createElement("div");
@@ -4789,10 +5771,11 @@ function renderChatArea(
     gap: 5px;
     box-sizing: border-box;
     padding: 7px;
-    border: 1px solid rgba(128, 128, 128, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 15px;
-    background: rgba(128, 128, 128, 0.045);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    background: #000;
+    color: #fff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   `;
 
   const inputBox = doc.createElement("textarea");
@@ -4809,7 +5792,7 @@ function renderChatArea(
     font-size: 12px;
     line-height: 1.45;
     font-family: inherit;
-    color: inherit;
+    color: #fff;
     background: transparent;
   `;
 
@@ -4894,8 +5877,8 @@ function renderChatArea(
     composer.style.boxShadow = "0 0 0 2px rgba(89, 192, 188, 0.12)";
   });
   inputBox.addEventListener("blur", () => {
-    composer.style.borderColor = "rgba(128, 128, 128, 0.28)";
-    composer.style.boxShadow = "inset 0 1px 0 rgba(255, 255, 255, 0.06)";
+    composer.style.borderColor = "rgba(255, 255, 255, 0.2)";
+    composer.style.boxShadow = "inset 0 1px 0 rgba(255, 255, 255, 0.04)";
   });
 
   const startNewQuickChatConversation = async (): Promise<void> => {
@@ -4929,7 +5912,7 @@ function renderChatArea(
       refreshThreadSelect();
     }
 
-    messagesArea.innerHTML = `<div style="color: #777; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-new-conversation-created"))}</div>`;
+    messagesArea.innerHTML = `<div style="color: #fff; text-align: center; padding: 10px;">${escapeHtmlForChat(getString("itempane-quick-chat-new-conversation-created"))}</div>`;
     inputBox.value = "";
     resizeQuickChatInput();
     sendBtn.textContent = "↑";
@@ -5028,7 +6011,7 @@ function renderChatArea(
         const pdfMode = LLMService.getEffectivePdfProcessMode();
 
         showPdfStatus(
-          `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-chat-loading-pdf")}</div>`,
+          `<div style="color: #fff; text-align: center; padding: 10px;">${getString("itempane-chat-loading-pdf")}</div>`,
         );
 
         const { content: pdfContent, isBase64 } =
@@ -5098,7 +6081,11 @@ function renderChatArea(
   syncQuickChatThreadControls();
 
   if (initiallyVisible) {
-    void loadPdfContentIfNeeded();
+    const startPdfLoad = (): void => {
+      void loadPdfContentIfNeeded();
+    };
+    if (doc.defaultView) doc.defaultView.setTimeout(startPdfLoad, 0);
+    else setTimeout(startPdfLoad, 0);
   }
 
   // 发送消息处理 - 快速追问（上下文为论文 + 当前对话框内历史）
@@ -5147,9 +6134,10 @@ function renderChatArea(
       contain: inline-size;
       margin-bottom: 12px;
       padding: 8px;
-      border: 1px solid rgba(128, 128, 128, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 8px;
       background: transparent;
+      color: #fff;
       user-select: text;
       cursor: text;
     `;
@@ -5168,7 +6156,8 @@ function renderChatArea(
       contain: inline-size;
       margin-bottom: 8px;
       padding: 8px;
-      background: rgba(89, 192, 188, 0.1);
+      background: #000;
+      color: #fff;
       border-radius: 6px;
       border-left: 3px solid #59c0bc;
       user-select: text;
@@ -5186,9 +6175,10 @@ function renderChatArea(
     aiMsgDiv.style.cssText = `
       margin-bottom: 8px;
       padding: 8px;
-      background: rgba(128, 128, 128, 0.05);
+      background: #000;
+      color: #fff;
       border-radius: 6px;
-      border-left: 3px solid #667eea;
+      border-left: 3px solid #8ab4ff;
       width: 100%;
       inline-size: 100%;
       max-width: 100%;
@@ -5203,7 +6193,7 @@ function renderChatArea(
       user-select: text;
       cursor: text;
     `;
-    aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <em style="color: #999;">${getString("itempane-thinking")}</em>`;
+    aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <em style="color: #fff;">${getString("itempane-thinking")}</em>`;
     pairWrapper.appendChild(aiMsgDiv);
 
     // 创建保存按钮区域（初始隐藏）
@@ -5419,10 +6409,10 @@ function renderChatArea(
           updateQuickChatAssistantMessage(
             aiMsgDiv,
             fullResponse,
-            `<div style="color: #777; font-size: 11px; margin-top: 6px;">${getString("itempane-stopped-note")}</div>`,
+            `<div style="color: #fff; font-size: 11px; margin-top: 6px;">${getString("itempane-stopped-note")}</div>`,
           );
         } else {
-          aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <span style="color: #777;">${getString("itempane-stopped-empty")}</span>`;
+          aiMsgDiv.innerHTML = `<strong>${getString("itempane-assistant-label")}</strong> <span style="color: #fff;">${getString("itempane-stopped-empty")}</span>`;
         }
         return;
       }
@@ -5607,55 +6597,6 @@ function escapeHtmlForChat(text: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;")
     .replace(/\n/g, "<br/>");
-}
-
-function sanitizeQuickChatDomString(text: string): string {
-  let result = "";
-  const input = String(text ?? "");
-  for (let index = 0; index < input.length; index++) {
-    const code = input.charCodeAt(index);
-    const isUnsafeControl =
-      code <= 8 ||
-      (code >= 11 && code <= 12) ||
-      (code >= 14 && code <= 31) ||
-      (code >= 127 && code <= 159);
-    if (isUnsafeControl) continue;
-
-    const isUnicodeNonCharacter =
-      (code >= 0xfdd0 && code <= 0xfdef) || code === 0xfffe || code === 0xffff;
-    if (isUnicodeNonCharacter) continue;
-
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = input.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        result += input[index] + input[index + 1];
-        index += 1;
-      } else {
-        result += "\uFFFD";
-      }
-      continue;
-    }
-
-    if (code >= 0xdc00 && code <= 0xdfff) {
-      result += "\uFFFD";
-      continue;
-    }
-
-    result += input[index];
-  }
-  return result;
-}
-
-function normalizeQuickChatXhtml(html: string): string {
-  return html
-    .replace(/&nbsp;/gi, "&#160;")
-    .replace(
-      /<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)\b([^>]*)>/gi,
-      (match, tagName: string, attributes: string) => {
-        if (match.endsWith("/>")) return match;
-        return `<${tagName}${attributes.replace(/\s*\/?\s*$/, "")}/>`;
-      },
-    );
 }
 
 function normalizeQuickChatMarkdownStructure(markdown: string): string {
@@ -6561,8 +7502,23 @@ async function loadNoteContent(
   item: Zotero.Item,
   noteContent: HTMLElement,
   noteKind: AiNoteKind = "summary",
+  options?: { keepVisible?: boolean },
 ): Promise<void> {
+  const loadKey = `note:${item.id}:${noteKind}`;
+  const loadSerial = beginSidebarContentLoad(loadKey);
+  const noteWriteIsCurrent = (): boolean =>
+    sidebarContentLoadIsCurrent(loadKey, loadSerial) &&
+    noteContent.isConnected !== false;
   try {
+    if (!sidebarContentLoadIsCurrent(loadKey, loadSerial)) return;
+    if (noteContent.isConnected === false) {
+      await new Promise<void>((resolve) => {
+        const view = noteContent.ownerDocument?.defaultView;
+        if (view) view.setTimeout(resolve, 0);
+        else setTimeout(resolve, 0);
+      });
+    }
+    if (!noteWriteIsCurrent()) return;
     if (isSidebarNoteEditing(item.id)) {
       setSidebarNoteEditStatus(
         doc,
@@ -6574,10 +7530,14 @@ async function loadNoteContent(
     }
 
     resetSidebarNoteContentEditMode(noteContent);
+    if (!options?.keepVisible) {
+      noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    }
     let aiNoteContent = "";
     const resolvedNote = await resolveSidebarSummaryNote(item, noteKind);
 
     if (!resolvedNote) {
+      if (!noteWriteIsCurrent()) return;
       hideSidebarMetadataPicker(doc, noteKind);
       noteContent.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
@@ -6585,6 +7545,12 @@ async function loadNoteContent(
           <div>${getString("itempane-note-empty-kind", { args: { kind: getSidebarNoteKindLabel(noteKind) } })}</div>
         </div>
       `;
+      if (noteKind === "summary" || noteKind === "deepRead") {
+        const emptyGenerate = createSidebarGenerateButton(doc, item, noteKind);
+        emptyGenerate.style.display = "block";
+        emptyGenerate.style.margin = "0 auto 16px";
+        noteContent.appendChild(emptyGenerate);
+      }
       updateSidebarNoteEditControls(doc, "missing", "", undefined, noteKind);
       return;
     }
@@ -6594,12 +7560,15 @@ async function loadNoteContent(
     const guardedNoteHtml = addZoteroNoteOverflowGuards(rawNoteHtml);
     if (guardedNoteHtml !== rawNoteHtml) {
       rawNoteHtml = guardedNoteHtml;
-      try {
-        (resolvedNote.note as any).setNote?.(guardedNoteHtml);
-        await (resolvedNote.note as any).saveTx?.();
-      } catch (error) {
-        ztoolkit.log("[AI-Butler] 修复 AI 笔记溢出样式失败:", error);
-      }
+      const noteToSave = resolvedNote.note;
+      void (async () => {
+        try {
+          (noteToSave as any).setNote?.(guardedNoteHtml);
+          await (noteToSave as any).saveTx?.();
+        } catch (error) {
+          ztoolkit.log("[AI-Butler] 修复 AI 笔记溢出样式失败:", error);
+        }
+      })();
     }
     const summaryBlocks = getDisplaySummaryBlocks(
       LLMNoteMetadataService.parseSummaryBlocks(rawNoteHtml),
@@ -6775,11 +7744,16 @@ async function loadNoteContent(
     const adaptedCss = themeManager.adaptCssForSidebar(themeCss);
 
     // 注入样式
+    const noteThemeNamespace = "http://www.w3.org/1999/xhtml";
     let styleEl = doc.getElementById(
       "ai-butler-note-theme",
-    ) as HTMLStyleElement;
-    if (!styleEl) {
-      styleEl = doc.createElement("style");
+    ) as HTMLStyleElement | null;
+    if (!styleEl || styleEl.namespaceURI !== noteThemeNamespace) {
+      styleEl?.remove();
+      styleEl = doc.createElementNS(
+        noteThemeNamespace,
+        "style",
+      ) as HTMLStyleElement;
       styleEl.id = "ai-butler-note-theme";
       const insertTarget = doc.body || doc.documentElement;
       if (insertTarget) {
@@ -6789,202 +7763,22 @@ async function loadNoteContent(
     styleEl.textContent =
       katexCss + "\n" + adaptedCss + "\n" + SIDEBAR_NOTE_OVERFLOW_GUARD_CSS;
 
-    /**
-     * 清理 LaTeX 公式中的 HTML 标签
-     * LLM 有时会在公式中输出 <br> 等 HTML 标签，需要在渲染前移除
-     */
-    const cleanLatex = (latex: string): string => {
-      return normalizeLatexForKatex(latex)
-        .replace(/<br\s*\/?>/gi, " ") // <br> or <br/> -> 空格
-        .replace(/<\/?(?:span|br|p|div|em|strong|code|sup|sub)\b[^>]*>/gi, ""); // 移除常见 HTML 标签，保留 LaTeX 比较符号
-    };
-
-    // Pre-render LaTeX formulas BEFORE XML validation
-    // This prevents LaTeX syntax (like \begin{cases}) from causing XML parsing errors
-    const renderLatexFormulas = (content: string): string => {
-      let result = content;
-
-      result = result.replace(
-        /<p\b([^>]*)>\s*(<span\b([^>]*)class="[^"]*\bmath\b[^"]*"([^>]*)>)/g,
-        (
-          match: string,
-          paragraphAttrs: string,
-          spanOpen: string,
-          beforeClassAttrs: string,
-          afterClassAttrs: string,
-        ) => {
-          if (
-            /text-align\s*:\s*center/i.test(paragraphAttrs) &&
-            !/\bdata-ai-butler-display-math\s*=/i.test(spanOpen)
-          ) {
-            return match.replace(
-              spanOpen,
-              `<span${beforeClassAttrs}class="math"${afterClassAttrs} data-ai-butler-display-math="true">`,
-            );
-          }
-          return match;
-        },
-      );
-
-      result = result.replace(
-        /<pre\b[^>]*class="[^"]*\bmath\b[^"]*"[^>]*>([\s\S]*?)<\/pre>/g,
-        (_match: string, innerContent: string) => {
-          const unescaped = decodeMathHtmlEntities(innerContent).trim();
-          const latex = stripMathDelimiters(unescaped);
-          try {
-            const rendered = katex.renderToString(cleanLatex(latex), {
-              throwOnError: false,
-              displayMode: true,
-              output: "html",
-              trust: true,
-              strict: false,
-            });
-            return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-          } catch {
-            return `<code>${innerContent}</code>`;
-          }
-        },
-      );
-
-      // 1. Render Zotero native format: <span class="math">...</span> (contains $...$ or $$...$$)
-      result = result.replace(
-        /<span\b([^>]*)class="[^"]*\bmath\b[^"]*"([^>]*)>([\s\S]*?)<\/span>/g,
-        (
-          _match: string,
-          beforeClassAttrs: string,
-          afterClassAttrs: string,
-          innerContent: string,
-        ) => {
-          // content might be $x$ or $$x$$ or escaped HTML
-          const unescaped = decodeMathHtmlEntities(innerContent);
-
-          const trimmed = unescaped.trim();
-          const mathAttrs = `${beforeClassAttrs} ${afterClassAttrs}`;
-          const isMarkedDisplay =
-            /\bdata-ai-butler-display-math\s*=\s*["']true["']/i.test(mathAttrs);
-
-          // Check for block formula markers
-          // 1. Double dollar signs $$...$$
-          // 2. Single dollar sign with \displaystyle (Zotero native block format)
-          const isDoubleDollar =
-            trimmed.startsWith("$$") && trimmed.endsWith("$$");
-          const isSingleDollar =
-            trimmed.startsWith("$") && trimmed.endsWith("$");
-          const hasDisplayStyle = trimmed.includes("\\displaystyle");
-
-          const rawLatex = stripMathDelimiters(trimmed);
-          const isTaggedDisplay = requiresDisplayMath(rawLatex);
-          const isBlock =
-            isMarkedDisplay ||
-            isDoubleDollar ||
-            (isSingleDollar && (hasDisplayStyle || isTaggedDisplay));
-
-          if (isBlock) {
-            // Removing delimiters
-            const latex = isDoubleDollar
-              ? trimmed.slice(2, -2)
-              : trimmed.slice(1, -1);
-
-            try {
-              const rendered = katex.renderToString(cleanLatex(latex), {
-                throwOnError: false,
-                displayMode: true,
-                output: "html",
-                trust: true,
-                strict: false,
-              });
-              return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-            } catch {
-              return `<code>${innerContent}</code>`;
-            }
-          } else if (isSingleDollar) {
-            const latex = trimmed.slice(1, -1);
-            const isTaggedDisplay = requiresDisplayMath(latex);
-            try {
-              const rendered = katex.renderToString(cleanLatex(latex), {
-                throwOnError: false,
-                displayMode: isTaggedDisplay ? true : false, // inline
-                output: "html",
-                trust: true,
-                strict: false,
-              });
-              if (isTaggedDisplay) {
-                return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-              }
-              return `<span class="katex-inline">${rendered}</span>`;
-            } catch {
-              return `<code>${innerContent}</code>`;
-            }
-          }
-
-          // plain text inside span.math? just return as is
-          return _match;
-        },
-      );
-
-      // 3. Render legacy block formulas $$...$$ (backward compatibility)
-      result = result.replace(
-        /\$\$([\s\S]*?)\$\$/g,
-        (_match: string, formula: string) => {
-          try {
-            const rendered = katex.renderToString(
-              cleanLatex(decodeMathHtmlEntities(formula.trim())),
-              {
-                throwOnError: false,
-                displayMode: true,
-                output: "html",
-                trust: true,
-                strict: false,
-              },
-            );
-            return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-          } catch {
-            // Render failed, escape the formula for safe display
-            const escaped = formula
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;");
-            return `<code>$$${escaped}$$</code>`;
-          }
-        },
-      );
-
-      // 4. Render legacy inline formulas $...$ (backward compatibility)
-      result = replaceInlineMath(result, (formula) => {
-        try {
-          const latex = decodeMathHtmlEntities(formula.trim());
-          const isTaggedDisplay = requiresDisplayMath(latex);
-          const rendered = katex.renderToString(cleanLatex(latex), {
-            throwOnError: false,
-            displayMode: isTaggedDisplay ? true : false,
-            output: "html",
-            trust: true,
-            strict: false,
-          });
-          if (isTaggedDisplay) {
-            return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-          }
-          return `<span class="katex-inline">${rendered}</span>`;
-        } catch {
-          // Render failed, escape the formula for safe display
-          const escaped = formula
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-          return `<code>$${escaped}$</code>`;
-        }
-      });
-
-      return result;
-    };
-
     const adjustedHeadingContent = demoteLongSidebarHeadingsToBlockquote(
       doc,
       aiNoteContent,
     );
 
-    // Render LaTeX first (before XML validation)
-    const latexRenderedContent = renderLatexFormulas(adjustedHeadingContent);
+    await new Promise<void>((resolve) => {
+      const view = doc.defaultView;
+      if (view) view.setTimeout(resolve, 0);
+      else setTimeout(resolve, 0);
+    });
+    if (!noteWriteIsCurrent()) return;
+
+    // Same KaTeX path as Chat, before the note HTML is checked as XHTML.
+    const latexRenderedContent = renderZoteroNoteDisplayHtml(
+      adjustedHeadingContent,
+    );
 
     const sanitizedContent = normalizeHtmlFragmentForXhtml(
       doc,
@@ -6998,6 +7792,8 @@ async function loadNoteContent(
       "application/xhtml+xml",
     );
     const parserError = docTest.querySelector("parsererror");
+
+    if (!noteWriteIsCurrent()) return;
 
     if (parserError) {
       // Extract error details
@@ -7163,10 +7959,12 @@ async function loadNoteContent(
       noteContent.appendChild(errorContainer);
     } else {
       // LaTeX formulas already rendered before XML validation
+      if (!noteWriteIsCurrent()) return;
       noteContent.innerHTML = sanitizedContent;
     }
   } catch (err: any) {
     ztoolkit.log("[AI-Butler] 加载笔记失败:", err);
+    if (!noteWriteIsCurrent()) return;
     noteContent.innerHTML = `<div style="color: #d32f2f; padding: 10px;">${getString("itempane-note-load-failed", { args: { message: escapeHtmlForChat(err.message) } })}</div>`;
   }
 }

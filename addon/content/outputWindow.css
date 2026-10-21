@@ -291,6 +291,8 @@
 #ai-butler-summary-view .katex-inline {
   overflow-wrap: normal !important;
   word-break: normal !important;
+  white-space: nowrap !important;
+  max-width: none !important;
   color: inherit;
 }
 
@@ -303,7 +305,7 @@
 #ai-butler-summary-view .katex-display {
   display: block;
   text-align: center;
-  white-space: normal !important;
+  white-space: nowrap !important;
   margin: 0.5em 0;
   max-width: 100%;
   overflow-x: auto;

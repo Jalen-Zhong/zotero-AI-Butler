@@ -25,10 +25,10 @@
 
 import { BaseView } from "./BaseView";
 import { MainWindow } from "./MainWindow";
-import { marked } from "marked";
 import { getPref } from "../../utils/prefs";
 import { getConfiguredSummaryPrompt } from "../../utils/prompts";
 import { getString } from "../../utils/locale";
+import { injectHtmlKatexStyle } from "../katexStyle";
 import { createStyledButton } from "./ui/components";
 import {
   LLMNoteMetadataService,
@@ -677,8 +677,10 @@ export class SummaryView extends BaseView {
               ".chat-message-content",
             ) as HTMLElement;
             if (contentDiv) {
-              contentDiv.innerHTML =
-                SummaryView.convertMarkdownToHTMLCore(fullResponse);
+              this.paintSummaryHtml(
+                contentDiv,
+                SummaryView.convertMarkdownToHTMLCore(fullResponse),
+              );
             }
           }
           // 自动滚动
@@ -692,8 +694,10 @@ export class SummaryView extends BaseView {
           ".chat-message-content",
         ) as HTMLElement;
         if (contentDiv) {
-          contentDiv.innerHTML =
-            SummaryView.convertMarkdownToHTMLCore(fullResponse);
+          this.paintSummaryHtml(
+            contentDiv,
+            SummaryView.convertMarkdownToHTMLCore(fullResponse),
+          );
         }
       }
 
@@ -735,7 +739,7 @@ export class SummaryView extends BaseView {
             const stoppedHtml = fullResponse
               ? `${SummaryView.convertMarkdownToHTMLCore(fullResponse)}<p style="color: #777; font-size: 12px;">${getString("summary-chat-stopped-not-saved")}</p>`
               : `<p style="color: #777;">${getString("summary-chat-stopped-empty")}</p>`;
-            contentDiv.innerHTML = stoppedHtml;
+            this.paintSummaryHtml(contentDiv, stoppedHtml);
           }
         }
         return;
@@ -812,21 +816,22 @@ export class SummaryView extends BaseView {
       styles: {
         fontSize: "14px",
         lineHeight: "1.6",
-        overflowWrap: "anywhere",
-        wordBreak: "break-word",
         minWidth: "0",
         maxWidth: "100%",
-        userSelect: "text", // 确保文本可以被选择
-        cursor: "text", // 鼠标样式提示可选择
+        userSelect: "text",
+        cursor: "text",
       },
-      innerHTML: content
-        ? SummaryView.convertMarkdownToHTMLCore(content)
-        : `<em>${getString("summary-thinking")}</em>`,
     });
 
     messageDiv.appendChild(roleLabel);
     messageDiv.appendChild(contentDiv);
     this.outputContainer.appendChild(messageDiv);
+    this.paintSummaryHtml(
+      contentDiv,
+      content
+        ? SummaryView.convertMarkdownToHTMLCore(content)
+        : `<em>${getString("summary-thinking")}</em>`,
+    );
 
     // 应用主题到新添加的元素
     this.applyTheme();
@@ -1074,8 +1079,10 @@ export class SummaryView extends BaseView {
         // 展开时隐藏摘要预览
         if (previewEl) previewEl.style.display = "none";
         if (!hasRenderedSummary) {
-          contentDiv.innerHTML =
-            SummaryView.convertMarkdownToHTMLCore(aiSummary);
+          this.paintSummaryHtml(
+            contentDiv,
+            SummaryView.convertMarkdownToHTMLCore(aiSummary),
+          );
           hasRenderedSummary = true;
         }
       } else {
@@ -1597,6 +1604,14 @@ export class SummaryView extends BaseView {
   }
 
   /**
+   * Dialog adoption happens after mount, so KaTeX CSS must be injected again
+   * into the document that actually shows the follow-up HTML.
+   */
+  protected onShow(): void {
+    this.initMathJax();
+  }
+
+  /**
    * 视图挂载后的初始化
    *
    * @protected
@@ -1703,50 +1718,14 @@ export class SummaryView extends BaseView {
    * @private
    */
   private initMathJax(): void {
-    // 加载 KaTeX CSS 样式
     this.mathJaxReady = false;
-
     if (!this.container) return;
     const doc = this.container.ownerDocument;
     if (!doc) return;
-
-    // 检查是否已添加 KaTeX CSS
-    if (doc.getElementById("ai-butler-katex-style")) {
-      this.mathJaxReady = true;
-      return;
-    }
-
-    // 异步加载 KaTeX CSS
-    (async () => {
-      try {
-        const { themeManager } = await import("../themeManager");
-        const katexCss = await themeManager.loadKatexCss();
-
-        if (!katexCss) {
-          ztoolkit.log("[AI-Butler] KaTeX CSS 加载失败，为空");
-          return;
-        }
-
-        // XUL style nodes display CSS as text and can push the library toolbar offscreen.
-        const styleEl = doc.createElementNS(
-          "http://www.w3.org/1999/xhtml",
-          "style",
-        );
-        styleEl.id = "ai-butler-katex-style";
-        styleEl.textContent = katexCss;
-
-        // 添加到文档
-        const insertTarget = doc.head || doc.documentElement;
-        if (insertTarget) {
-          insertTarget.appendChild(styleEl);
-          ztoolkit.log("[AI-Butler] KaTeX CSS 已加载");
-        }
-
-        this.mathJaxReady = true;
-      } catch (e) {
-        ztoolkit.log("[AI-Butler] KaTeX CSS 加载出错:", e);
-      }
-    })();
+    const targetDoc = doc;
+    void injectHtmlKatexStyle(targetDoc, "ai-butler-katex-style").then((ok) => {
+      if (this.container?.ownerDocument === targetDoc) this.mathJaxReady = ok;
+    });
   }
 
   /**
@@ -2215,7 +2194,7 @@ export class SummaryView extends BaseView {
     if (contentElement) {
       // 渲染 Markdown
       const html = this.convertMarkdownToHTML(this.currentItemBuffer);
-      contentElement.innerHTML = html;
+      this.paintSummaryHtml(contentElement, html);
 
       // 调试信息:检查滚动容器状态
       if (this.scrollArea) {
@@ -2530,8 +2509,13 @@ export class SummaryView extends BaseView {
    * @private
    */
   private convertMarkdownToHTML(markdown: string): string {
-    // 总结页面显示原始公式文本，不使用 KaTeX 渲染
-    return marked.parse(markdown) as string;
+    return SummaryView.convertMarkdownToHTMLCore(markdown);
+  }
+
+  private paintSummaryHtml(host: HTMLElement, html: string): void {
+    host.innerHTML = html;
+    const doc = host.ownerDocument;
+    if (doc) void injectHtmlKatexStyle(doc, "ai-butler-katex-style");
   }
 
   /**
