@@ -4,6 +4,7 @@ import {
   decodeMathHtmlEntities,
   markdownToDisplayHtml,
   markdownToZoteroNoteHtml,
+  renderZoteroNoteDisplayHtml,
   normalizeLatexForKatex,
   requiresDisplayMath,
   stripMathDelimiters,
@@ -464,5 +465,47 @@ describe("note Markdown rendering", function () {
       },
     ]);
     expect(updated).not.to.contain("remove question");
+  });
+
+  it("renders summary note math with the same KaTeX path as chat", function () {
+    const html = renderZoteroNoteDisplayHtml(
+      '<p><span class="math">$\\phi$</span> and $\\mu$</p>',
+    );
+    const text = html.replace(/<[^>]+>/g, "");
+
+    expect(html).to.contain('class="katex"');
+    expect(html).to.not.contain('class="math"');
+    expect(text).to.not.contain("$");
+    expect(html).to.not.contain("katex-error");
+  });
+
+  it("keeps dollars inside code literal and renders display subscripts", function () {
+    const code = renderZoteroNoteDisplayHtml("<code>$\\phi$</code>");
+    const display = renderZoteroNoteDisplayHtml(
+      '<pre class="math">$$a_b$$</pre>',
+    );
+    const quoted = renderZoteroNoteDisplayHtml(
+      "<span class='math'>$\\phi(\\cdot)$</span>",
+    );
+    const entities = renderZoteroNoteDisplayHtml("<p>&#36;\\phi&#36;</p>");
+
+    expect(code).to.contain("$\\phi$");
+    expect(code).to.not.contain("katex");
+    expect(display).to.contain("katex-display");
+    expect(display).to.contain("katex-strut");
+    expect(quoted).to.contain('class="katex"');
+    expect(quoted.replace(/<[^>]+>/g, "")).to.not.contain("$");
+    expect(entities).to.contain('class="katex"');
+    expect(entities).to.not.contain("&#36;");
+    expect(entities.replace(/<[^>]+>/g, "")).to.not.contain("$");
+  });
+
+  it("splits adjacent inline formulas instead of leaving the dollars", function () {
+    const html = renderZoteroNoteDisplayHtml("<p>$\\phi(p)$$\\phi(1-p)$</p>");
+    const text = html.replace(/<[^>]+>/g, "");
+
+    expect(html).to.contain('class="katex"');
+    expect(text).to.not.contain("$");
+    expect(html).to.not.contain("katex-error");
   });
 });

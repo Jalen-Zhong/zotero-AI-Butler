@@ -76,6 +76,7 @@ import {
   fillDeepReadSlot,
   hasDeepReadV2Slots,
   hasIncompleteDeepReadContent,
+  shouldResumeDeepRead,
   isDeepReadSlotDone,
   markDeepReadSlotRunning,
   migrateLegacyDeepReadHtmlToSlots,
@@ -434,7 +435,8 @@ export class NoteGenerator {
           item,
           existing,
           existingHtml: existingRecord?.rawHtml || "",
-          policy,
+          policy: options?.forceOverwrite ? "overwrite" : policy,
+          forceOverwrite: options?.forceOverwrite,
           pdfContent,
           isBase64,
           itemTitle,
@@ -498,7 +500,7 @@ export class NoteGenerator {
         kind: noteKind,
         html: noteContent,
         existing,
-        policy,
+        policy: options?.forceOverwrite ? "overwrite" : policy,
       });
 
       // 如果有输出窗口,标记当前条目完成
@@ -1136,6 +1138,7 @@ export class NoteGenerator {
     existing: Zotero.Item | null;
     existingHtml: string;
     policy: string;
+    forceOverwrite?: boolean;
     pdfContent: string;
     isBase64: boolean;
     itemTitle: string;
@@ -1157,8 +1160,7 @@ export class NoteGenerator {
     const hasExistingDeepReadHtml = !!params.existingHtml?.trim();
     const shouldResume =
       !!params.existing &&
-      (hasDeepReadV2Slots(params.existingHtml) ||
-        hasIncompleteDeepReadContent(params.existingHtml));
+      shouldResumeDeepRead(params.existingHtml, params.forceOverwrite);
     const shouldMigrateLegacyResume =
       shouldResume && !hasDeepReadV2Slots(params.existingHtml);
     const restoredPlan = shouldResume

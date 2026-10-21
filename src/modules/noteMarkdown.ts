@@ -146,13 +146,19 @@ export function replaceInlineMath(
   text: string,
   render: (formula: string) => string,
 ): string {
-  const expression = /(\$(?!\$)|\\\()([^$\n]+?)(\$(?!\$)|\\\))/g;
+  // `$\phi(p)$$\phi(1-p)$` is two inline formulas. The shared `$` closes one and
+  // opens the next. A real `$$...$$` display span still stays literal.
+  const expression = /(\$(?!\$)|\\\()([^$\n]+?)(\$(?=\$[^$\s]|[^$]|$)|\\\))/g;
   let renderedText = "";
   let copiedUntil = 0;
   let match: RegExpExecArray | null;
   while ((match = expression.exec(text))) {
-    if (match[1] === "$" && text[match.index - 1] === "$") {
-      // Without lookbehind, a rejected delimiter must not consume the next formula.
+    if (
+      match[1] === "$" &&
+      text[match.index - 1] === "$" &&
+      copiedUntil !== match.index
+    ) {
+      // The second `$` of `$$display$$` is not an inline opener.
       expression.lastIndex = match.index + 1;
       continue;
     }
@@ -637,7 +643,10 @@ export type DisplayFormula = {
  * Fenced and inline code is restored, so dollars inside code stay literal.
  * Placeholders are stable tokens the caller replaces with KaTeX HTML.
  */
-export function extractDisplayFormulas(markdown: string): {
+export function extractDisplayFormulas(
+  markdown: string,
+  options?: { promoteUndelimited?: boolean },
+): {
   markdown: string;
   formulas: DisplayFormula[];
 } {
@@ -654,7 +663,9 @@ export function extractDisplayFormulas(markdown: string): {
   text = text.replace(/\\\\([()[\]])/g, "\\$1");
   // \\sqrt / \\frac outside code become \sqrt / \frac before delimiter matching.
   text = text.replace(/\\{2,}(?=[a-zA-Z])/g, "\\");
-  text = promoteUndelimitedTex(text);
+  if (options?.promoteUndelimited !== false) {
+    text = promoteUndelimitedTex(text);
+  }
 
   const pushFormula = (content: string, isBlock: boolean): string => {
     const placeholder = `AI_BUTLER_FORMULA_${isBlock ? "BLOCK" : "INLINE"}_${formulas.length}_END`;
@@ -678,11 +689,7 @@ export function extractDisplayFormulas(markdown: string): {
   text = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, formula: string) =>
     pushFormula(formula, false),
   );
-  text = text.replace(
-    /(^|[^$])\$(?!\$)((?:\\\$|[^$\n])+?)\$(?!\$)/g,
-    (_match, prefix: string, formula: string) =>
-      `${prefix}${pushFormula(formula, false)}`,
-  );
+  text = replaceInlineMath(text, (formula) => pushFormula(formula, false));
 
   text = text.replace(
     /AIBUTLERCODEBLOCK(\d+)END/g,
@@ -754,6 +761,174 @@ export function markdownToDisplayHtml(markdown: string): string {
   return html.replace(
     /AI_BUTLER_FORMULA_(BLOCK|INLINE)_(\d+)_END/g,
     renderFormula,
+  );
+}
+
+function decodeDollarEntities(html: string): string {
+  return html
+    .replace(/&#0*36;/g, "$")
+    .replace(/&#x0*24;/gi, "$")
+    .replace(/&dollar;/gi, "$");
+}
+
+function attributeValue(attrs: string, name: string): string {
+  const match = attrs.match(
+    new RegExp(`\\b${name}\\s*=\\s*(['"])([\\s\\S]*?)\\1`, "i"),
+  );
+  return match?.[2] || "";
+}
+
+function hasMathClass(attrs: string): boolean {
+  return /(?:^|\s)math(?:\s|$)/.test(attributeValue(attrs, "class"));
+}
+
+function renderExtractedMath(source: string, forceBlock: boolean): string {
+  const extracted = extractDisplayFormulas(source, {
+    promoteUndelimited: false,
+  });
+  if (!extracted.formulas.length) {
+    const content = stripMathDelimiters(source).trim();
+    if (!content || !/\\[a-zA-Z]/.test(content)) return "";
+    return renderDisplayFormulaHtml({
+      content,
+      isBlock: forceBlock || requiresDisplayMath(content),
+    });
+  }
+  return extracted.markdown.replace(
+    /AI_BUTLER_FORMULA_(BLOCK|INLINE)_(\d+)_END/g,
+    (match, type: string, index: string) => {
+      const formula = extracted.formulas[parseInt(index, 10)];
+      if (!formula) return match;
+      if (forceBlock || type === "BLOCK") {
+        return renderDisplayFormulaHtml({ ...formula, isBlock: true });
+      }
+      return renderDisplayFormulaHtml(formula);
+    },
+  );
+}
+
+function markCenteredMathSpans(html: string): string {
+  return html.replace(
+    /<p\b([^>]*)>\s*(<span\b([^>]*)>)/gi,
+    (match, paragraphAttrs: string, spanOpen: string, spanAttrs: string) => {
+      if (!/text-align\s*:\s*center/i.test(paragraphAttrs)) return match;
+      if (!hasMathClass(spanAttrs)) return match;
+      if (/\bdata-ai-butler-display-math\s*=/i.test(spanOpen)) return match;
+      return match.replace(
+        spanOpen,
+        spanOpen.replace(
+          /<span\b/i,
+          '<span data-ai-butler-display-math="true"',
+        ),
+      );
+    },
+  );
+}
+
+function replaceSavedMathElements(
+  html: string,
+  protect: (rendered: string) => string,
+): string {
+  const renderTag = (
+    match: string,
+    tag: string,
+    attrs: string,
+    inner: string,
+  ): string => {
+    if (!hasMathClass(attrs)) return match;
+    const unescaped = decodeMathHtmlEntities(inner);
+    const dataLatex = decodeMathHtmlEntities(
+      attributeValue(attrs, "data-latex"),
+    );
+    const source = unescaped.trim() ? unescaped : dataLatex;
+    if (!source.trim()) return match;
+    const trimmed = source.trim();
+    const forceBlock =
+      tag.toLowerCase() === "pre" ||
+      /\bdata-ai-butler-display-math\s*=\s*(['"])true\1/i.test(attrs) ||
+      (trimmed.startsWith("$$") &&
+        trimmed.endsWith("$$") &&
+        trimmed.length >= 4);
+    const rendered = renderExtractedMath(source, forceBlock);
+    if (!rendered.trim()) return match;
+    return protect(rendered);
+  };
+
+  let working = html.replace(
+    /<(pre)\b([^>]*)>([\s\S]*?)<\/\1>/gi,
+    (match, tag: string, attrs: string, inner: string) =>
+      renderTag(match, tag, attrs, inner),
+  );
+  working = working.replace(
+    /<(span)\b([^>]*)>([\s\S]*?)<\/\1>/gi,
+    (match, tag: string, attrs: string, inner: string) =>
+      renderTag(match, tag, attrs, inner),
+  );
+  return working;
+}
+
+function renderLooseMathText(text: string): string {
+  if (!/\$|\\\(|\\\[|\\begin\{/.test(text)) return text;
+  return renderExtractedMath(text, false) || text;
+}
+
+function renderLooseMathInHtml(html: string): string {
+  const skipTags = new Set(["code", "pre", "script", "style", "textarea"]);
+  const voidTags = new Set([
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "source",
+    "track",
+    "wbr",
+  ]);
+  const parts = html.split(/(<[^>]+>)/g);
+  let skipDepth = 0;
+  return parts
+    .map((part) => {
+      if (!part) return part;
+      if (part.startsWith("<")) {
+        const tagMatch = /^<\s*(\/)?\s*([a-zA-Z0-9]+)/.exec(part);
+        if (!tagMatch) return part;
+        const name = tagMatch[2].toLowerCase();
+        const selfClosing = /\/>\s*$/.test(part) || voidTags.has(name);
+        if (skipTags.has(name) && !selfClosing) {
+          skipDepth = tagMatch[1] ? Math.max(0, skipDepth - 1) : skipDepth + 1;
+        }
+        return part;
+      }
+      if (skipDepth > 0) return part;
+      return renderLooseMathText(part);
+    })
+    .join("");
+}
+
+/**
+ * Render `$...$` / `$$...$$` in a saved Zotero note the same way Chat does.
+ * Fenced code and `<code>` / `<pre>` stay literal. Undelimited TeX is not
+ * promoted, so prose that mentions a command is left alone.
+ */
+export function renderZoteroNoteDisplayHtml(html: string): string {
+  const protectedChunks: string[] = [];
+  const protect = (rendered: string): string => {
+    const token = `AIBUTLERNOTEMATH${protectedChunks.length}END`;
+    protectedChunks.push(rendered);
+    return token;
+  };
+  let working = decodeDollarEntities(String(html ?? ""));
+  working = markCenteredMathSpans(working);
+  working = replaceSavedMathElements(working, protect);
+  working = renderLooseMathInHtml(working);
+  return working.replace(
+    /AIBUTLERNOTEMATH(\d+)END/g,
+    (_match, index: string) => protectedChunks[parseInt(index, 10)] ?? _match,
   );
 }
 

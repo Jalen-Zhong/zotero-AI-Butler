@@ -1119,7 +1119,7 @@ export class TaskQueueView extends BaseView {
       actions.appendChild(copyErrorBtn);
     }
 
-    if (task.taskType === "deepRead" && task.status === TaskStatus.COMPLETED) {
+    if (task.taskType === "deepRead" && task.status === TaskStatus.FAILED) {
       const completeDeepReadBtn = this.createElement("button", {
         styles: {
           padding: "6px 12px",

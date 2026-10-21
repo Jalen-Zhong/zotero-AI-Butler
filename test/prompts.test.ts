@@ -29,6 +29,7 @@ import {
   getDeepReadSlotStatus,
   hasIncompleteDeepReadContent,
   isDeepReadSlotDone,
+  shouldResumeDeepRead,
   markDeepReadSlotRunning,
   planDeepReadSlots,
   resetRunningDeepReadSlots,
@@ -246,6 +247,14 @@ describe("multi-round prompt templates v2", function () {
     expect(
       hasIncompleteDeepReadContent("<h2>Intro</h2><p>Finished analysis.</p>"),
     ).to.equal(false);
+    expect(shouldResumeDeepRead(exportedHtml, false)).to.equal(true);
+    expect(shouldResumeDeepRead(exportedHtml, true)).to.equal(false);
+    expect(shouldResumeDeepRead("", false)).to.equal(false);
+    const template = v2Template();
+    const planned = planDeepReadSlots(template, DEFAULT_CHAPTER_FALLBACKS);
+    const skeleton = buildDeepReadSkeletonHtml("Paper", template, planned);
+    expect(shouldResumeDeepRead(skeleton, false)).to.equal(true);
+    expect(shouldResumeDeepRead(skeleton, true)).to.equal(false);
   });
 
   it("keeps stripped English placeholder sections runnable in legacy slot fallback", function () {

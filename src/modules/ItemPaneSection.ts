@@ -50,16 +50,11 @@ import { openQuickChatRelatedSelectorDialog } from "./quickChatRelatedSelector";
 import {
   addZoteroNoteOverflowGuards,
   buildFollowUpChatPairNoteHtml,
-  decodeMathHtmlEntities,
   normalizeFollowUpChatNoteHtml,
-  normalizeLatexForKatex,
-  requiresDisplayMath,
-  stripMathDelimiters,
-  replaceInlineMath,
+  renderZoteroNoteDisplayHtml,
 } from "./noteMarkdown";
 import { AiNoteService, type AiNoteKind } from "./aiNoteService";
 import { SummaryView } from "./views/SummaryView";
-import katex from "katex";
 // 注意: 不在主进程中直接 import 思维导图库（如 markmap-view、simple-mind-map）
 // 这些库在加载时会访问 document/window，而 Zotero Background 进程没有 DOM 环境
 // 改用 iframe 架构：在独立 HTML 页面中加载这些库
@@ -1003,7 +998,7 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 }
 
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
-const SIDEBAR_LAYOUT_GENERATION = "7";
+const SIDEBAR_LAYOUT_GENERATION = "8";
 
 function sidebarChromeIsCurrent(body: HTMLElement): boolean {
   if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
@@ -1842,6 +1837,18 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex .vlist-s {
       min-width: 2px;
       width: 2px;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex-mathml,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex-mathml {
+      position: absolute !important;
+      clip: rect(1px, 1px, 1px, 1px) !important;
+      clip-path: inset(50%) !important;
+      height: 1px !important;
+      width: 1px !important;
+      overflow: hidden !important;
+      padding: 0 !important;
+      border: 0 !important;
     }
 
     .ai-butler-sidebar-chat-entry {
@@ -7319,11 +7326,16 @@ async function loadNoteContent(
     const adaptedCss = themeManager.adaptCssForSidebar(themeCss);
 
     // 注入样式
+    const noteThemeNamespace = "http://www.w3.org/1999/xhtml";
     let styleEl = doc.getElementById(
       "ai-butler-note-theme",
-    ) as HTMLStyleElement;
-    if (!styleEl) {
-      styleEl = doc.createElement("style");
+    ) as HTMLStyleElement | null;
+    if (!styleEl || styleEl.namespaceURI !== noteThemeNamespace) {
+      styleEl?.remove();
+      styleEl = doc.createElementNS(
+        noteThemeNamespace,
+        "style",
+      ) as HTMLStyleElement;
       styleEl.id = "ai-butler-note-theme";
       const insertTarget = doc.body || doc.documentElement;
       if (insertTarget) {
@@ -7333,202 +7345,15 @@ async function loadNoteContent(
     styleEl.textContent =
       katexCss + "\n" + adaptedCss + "\n" + SIDEBAR_NOTE_OVERFLOW_GUARD_CSS;
 
-    /**
-     * 清理 LaTeX 公式中的 HTML 标签
-     * LLM 有时会在公式中输出 <br> 等 HTML 标签，需要在渲染前移除
-     */
-    const cleanLatex = (latex: string): string => {
-      return normalizeLatexForKatex(latex)
-        .replace(/<br\s*\/?>/gi, " ") // <br> or <br/> -> 空格
-        .replace(/<\/?(?:span|br|p|div|em|strong|code|sup|sub)\b[^>]*>/gi, ""); // 移除常见 HTML 标签，保留 LaTeX 比较符号
-    };
-
-    // Pre-render LaTeX formulas BEFORE XML validation
-    // This prevents LaTeX syntax (like \begin{cases}) from causing XML parsing errors
-    const renderLatexFormulas = (content: string): string => {
-      let result = content;
-
-      result = result.replace(
-        /<p\b([^>]*)>\s*(<span\b([^>]*)class="[^"]*\bmath\b[^"]*"([^>]*)>)/g,
-        (
-          match: string,
-          paragraphAttrs: string,
-          spanOpen: string,
-          beforeClassAttrs: string,
-          afterClassAttrs: string,
-        ) => {
-          if (
-            /text-align\s*:\s*center/i.test(paragraphAttrs) &&
-            !/\bdata-ai-butler-display-math\s*=/i.test(spanOpen)
-          ) {
-            return match.replace(
-              spanOpen,
-              `<span${beforeClassAttrs}class="math"${afterClassAttrs} data-ai-butler-display-math="true">`,
-            );
-          }
-          return match;
-        },
-      );
-
-      result = result.replace(
-        /<pre\b[^>]*class="[^"]*\bmath\b[^"]*"[^>]*>([\s\S]*?)<\/pre>/g,
-        (_match: string, innerContent: string) => {
-          const unescaped = decodeMathHtmlEntities(innerContent).trim();
-          const latex = stripMathDelimiters(unescaped);
-          try {
-            const rendered = katex.renderToString(cleanLatex(latex), {
-              throwOnError: false,
-              displayMode: true,
-              output: "html",
-              trust: true,
-              strict: false,
-            });
-            return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-          } catch {
-            return `<code>${innerContent}</code>`;
-          }
-        },
-      );
-
-      // 1. Render Zotero native format: <span class="math">...</span> (contains $...$ or $$...$$)
-      result = result.replace(
-        /<span\b([^>]*)class="[^"]*\bmath\b[^"]*"([^>]*)>([\s\S]*?)<\/span>/g,
-        (
-          _match: string,
-          beforeClassAttrs: string,
-          afterClassAttrs: string,
-          innerContent: string,
-        ) => {
-          // content might be $x$ or $$x$$ or escaped HTML
-          const unescaped = decodeMathHtmlEntities(innerContent);
-
-          const trimmed = unescaped.trim();
-          const mathAttrs = `${beforeClassAttrs} ${afterClassAttrs}`;
-          const isMarkedDisplay =
-            /\bdata-ai-butler-display-math\s*=\s*["']true["']/i.test(mathAttrs);
-
-          // Check for block formula markers
-          // 1. Double dollar signs $$...$$
-          // 2. Single dollar sign with \displaystyle (Zotero native block format)
-          const isDoubleDollar =
-            trimmed.startsWith("$$") && trimmed.endsWith("$$");
-          const isSingleDollar =
-            trimmed.startsWith("$") && trimmed.endsWith("$");
-          const hasDisplayStyle = trimmed.includes("\\displaystyle");
-
-          const rawLatex = stripMathDelimiters(trimmed);
-          const isTaggedDisplay = requiresDisplayMath(rawLatex);
-          const isBlock =
-            isMarkedDisplay ||
-            isDoubleDollar ||
-            (isSingleDollar && (hasDisplayStyle || isTaggedDisplay));
-
-          if (isBlock) {
-            // Removing delimiters
-            const latex = isDoubleDollar
-              ? trimmed.slice(2, -2)
-              : trimmed.slice(1, -1);
-
-            try {
-              const rendered = katex.renderToString(cleanLatex(latex), {
-                throwOnError: false,
-                displayMode: true,
-                output: "html",
-                trust: true,
-                strict: false,
-              });
-              return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-            } catch {
-              return `<code>${innerContent}</code>`;
-            }
-          } else if (isSingleDollar) {
-            const latex = trimmed.slice(1, -1);
-            const isTaggedDisplay = requiresDisplayMath(latex);
-            try {
-              const rendered = katex.renderToString(cleanLatex(latex), {
-                throwOnError: false,
-                displayMode: isTaggedDisplay ? true : false, // inline
-                output: "html",
-                trust: true,
-                strict: false,
-              });
-              if (isTaggedDisplay) {
-                return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-              }
-              return `<span class="katex-inline">${rendered}</span>`;
-            } catch {
-              return `<code>${innerContent}</code>`;
-            }
-          }
-
-          // plain text inside span.math? just return as is
-          return _match;
-        },
-      );
-
-      // 3. Render legacy block formulas $$...$$ (backward compatibility)
-      result = result.replace(
-        /\$\$([\s\S]*?)\$\$/g,
-        (_match: string, formula: string) => {
-          try {
-            const rendered = katex.renderToString(
-              cleanLatex(decodeMathHtmlEntities(formula.trim())),
-              {
-                throwOnError: false,
-                displayMode: true,
-                output: "html",
-                trust: true,
-                strict: false,
-              },
-            );
-            return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-          } catch {
-            // Render failed, escape the formula for safe display
-            const escaped = formula
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;");
-            return `<code>$$${escaped}$$</code>`;
-          }
-        },
-      );
-
-      // 4. Render legacy inline formulas $...$ (backward compatibility)
-      result = replaceInlineMath(result, (formula) => {
-        try {
-          const latex = decodeMathHtmlEntities(formula.trim());
-          const isTaggedDisplay = requiresDisplayMath(latex);
-          const rendered = katex.renderToString(cleanLatex(latex), {
-            throwOnError: false,
-            displayMode: isTaggedDisplay ? true : false,
-            output: "html",
-            trust: true,
-            strict: false,
-          });
-          if (isTaggedDisplay) {
-            return `<div class="katex-scroll-container" style="display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;contain:inline-size;"><div class="katex-display">${rendered}</div></div>`;
-          }
-          return `<span class="katex-inline">${rendered}</span>`;
-        } catch {
-          // Render failed, escape the formula for safe display
-          const escaped = formula
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-          return `<code>$${escaped}$</code>`;
-        }
-      });
-
-      return result;
-    };
-
     const adjustedHeadingContent = demoteLongSidebarHeadingsToBlockquote(
       doc,
       aiNoteContent,
     );
 
-    // Render LaTeX first (before XML validation)
-    const latexRenderedContent = renderLatexFormulas(adjustedHeadingContent);
+    // Same KaTeX path as Chat, before the note HTML is checked as XHTML.
+    const latexRenderedContent = renderZoteroNoteDisplayHtml(
+      adjustedHeadingContent,
+    );
 
     const sanitizedContent = normalizeHtmlFragmentForXhtml(
       doc,

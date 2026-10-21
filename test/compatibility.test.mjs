@@ -673,6 +673,13 @@ test("inline math preserves adjacent formulas and double-dollar boundaries witho
   );
   assert.equal(rendered, "<a><b><c> $$display$$ <d>");
   assert.equal(
+    context.NoteMarkdown.replaceInlineMath(
+      "$\\phi(p)$$\\phi(1-p)$",
+      (formula) => `<${formula}>`,
+    ),
+    "<\\phi(p)><\\phi(1-p)>",
+  );
+  assert.equal(
     context.NoteMarkdown.replaceInlineMath("$line\nbreak$", assert.fail),
     "$line\nbreak$",
   );
