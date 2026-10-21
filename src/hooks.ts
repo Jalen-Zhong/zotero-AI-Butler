@@ -50,6 +50,7 @@ import {
   DEFAULT_CONTEXT_MENU_ITEM_VISIBILITY_PREF,
   DEFAULT_SIDEBAR_MODULE_ORDER_PREF,
   DEFAULT_SIDEBAR_MODULE_VISIBILITY_PREF,
+  migrateForkSidebarSummaryVisibility,
   getContextMenuItemOrder,
   isContextMenuCollapsed,
   isContextMenuItemEnabled,
@@ -250,6 +251,7 @@ function registerPrefsPane() {
  * - promptVersion: 提示词版本号(用于版本升级)
  */
 function initializeDefaultPrefsOnStartup() {
+  migrateForkSidebarSummaryVisibility();
   // 定义所有配置项的默认值
   const defaults: Record<string, any> = {
     openaiApiKey: "", // API 密钥默认为空,需用户配置
@@ -1658,10 +1660,8 @@ async function registerItemPaneSection() {
  */
 async function handleOpenAIChat(itemId: number): Promise<void> {
   try {
-    // 打开主窗口并切换到摘要视图
-    const mainWin = MainWindow.getInstance();
-    await mainWin.open("chat");
-    mainWin.getChatView().openItem(itemId);
+    const { focusSidebarTab } = await import("./modules/ItemPaneSection");
+    await focusSidebarTab("chat", itemId);
   } catch (error: any) {
     ztoolkit.log("[AI-Butler] 打开 AI 追问失败:", error);
     new ztoolkit.ProgressWindow("AI Butler", {

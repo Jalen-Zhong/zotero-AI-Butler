@@ -529,16 +529,6 @@ export class MainWindow {
           icon: "📊",
         },
         {
-          id: "summary",
-          label: getString("main-window-tab-summary"),
-          icon: "📝",
-        },
-        {
-          id: "chat",
-          label: getString("main-window-tab-chat"),
-          icon: "💬",
-        },
-        {
           id: "agent",
           label: getString("main-window-tab-agent"),
           icon: "✦",
@@ -658,6 +648,11 @@ export class MainWindow {
    * @param force 强制切换(即使已是当前标签)
    */
   public switchTab(tabId: TabType, force: boolean = false): void {
+    // Summary and Chat are sidebar tabs. Keep their views for task streaming,
+    // but never show them as a main-window surface.
+    if (tabId === "summary" || tabId === "chat") {
+      tabId = "dashboard";
+    }
     if (this.activeTab === tabId && !force) return;
 
     // 隐藏当前视图

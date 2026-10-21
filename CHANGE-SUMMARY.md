@@ -1,27 +1,21 @@
-# 5.0.0-beta.2-jalen.4
+# 5.0.0-beta.2-jalen.5
 
-Fork-only build. Chat stays pure black (`#000`) with white (`#fff`) text. Subscripts and superscripts use the KaTeX 0.18 layout.
-
-## Why subscripts sat on the base
-
-Chat, Summary, and Agent render math with KaTeX **0.18.1**. That HTML uses `katex-strut`, `katex-base`, and `katex-sizing` (for example `.katex-sizing.reset-size6.size3` at `font-size: .7em`).
-
-The stylesheet shipped in the add-on was still KaTeX **0.16.27**. It styles `.strut` and `.sizing`, which 0.18 no longer emits. The script `top` offset was present, but the script never shrank and the strut stayed `display: inline`, so `height` and `vertical-align` on it were ignored. Subscripts stayed full size and overlapped the base (`R_{BoN}`, `D_{KL,BoN}`, `e^{\alpha_{RL}/\beta_{RL}-1}`).
-
-Fonts were already the 0.18 files. KaTeX CSS was already injected. A parent `line-height` or `vertical-align` reset was not the cause, and this build does not add one.
+Fork-only build. Summary, Chat, Deep Read, and Mind Map live on the item sidebar. The main window no longer uses AI Summary or Chat as the paper viewer.
 
 ## What changed
 
-- `addon/content/katex.min.css` is the 0.18.1 stylesheet that matches the renderer. Chat, Summary, and Agent all load this file.
-- Chat still forces `box-sizing: content-box` on `.katex` and keeps `.vlist-s` at 2px, so the chat’s `border-box` / `min-width: 0` rules do not shrink KaTeX’s script table. Those rules do not set `line-height` or `vertical-align` on `.katex` internals.
-- Sidebar layout generation is `4`, so an open pane replaces the inlined 0.16 CSS from jalen.3.
-- The black shell, black Chat bubbles, and page-mode Chat (no Full Chat card) are unchanged.
+- The main window tab bar no longer has AI Summary or Chat. Dashboard, Agent, Task Queue, and Settings stay. Opening those old tabs lands on the dashboard instead of the paper viewer. Task-queue details no longer switches to the Summary view.
+- The item sidebar tabs are Summary, Chat, Deep Read, and Mind Map. Chat is still the full-height page-mode thread (new, cache, delete). There is no separate Chat window button and no Full Chat card.
+- Summary and Deep Read each have a Generate button for the selected paper, using the same queue path as Mind Map (`addTask` / `addDeepReadTask`, priority for that one item).
+- The default sidebar map shows the summary note. A profile that still has the exact previous fork map (summary hidden, table and image summary hidden) is updated so Summary appears. Any other saved map is left alone.
+- Chat stays `#000` / `#fff`. Summary and Deep Read use the same black shell with white text. KaTeX is still the 0.18 stylesheet, and the sidebar note rules do not reset `line-height` or `vertical-align` inside `.katex`.
 
 ## Verify in Zotero
 
-1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.4.xpi` and restart Zotero. Select the paper again if the pane was left open from jalen.3.
-2. In Chat, `R_{BoN}` and `\alpha_{BoN}` should show a smaller subscript below the baseline, and `e^{\alpha_{RL}/\beta_{RL}-1}` should show a raised exponent. The pane stays black with white text, and there is no Full Chat card.
+1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.5.xpi` and restart Zotero.
+2. The 🤖 window should not show AI Summary or Chat tabs. Select a paper and use the sidebar: Summary, Chat, Deep Read, Mind Map.
+3. Generate on Summary or Deep Read queues that paper only. Chat stays black, and subscripts still sit below the baseline.
 
 ## Prefs
 
-This build does not rewrite `markdownTheme` or `sidebarQuickChatHeight`.
+Table summary and one-image summary stay off. `sidebarQuickChatHeight` is not rewritten. Page-mode Chat still ignores that height pref.

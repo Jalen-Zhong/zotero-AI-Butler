@@ -279,6 +279,12 @@ type SidebarTabDefinition = {
 
 const SIDEBAR_TAB_DEFINITIONS: SidebarTabDefinition[] = [
   {
+    id: "summary",
+    labelKey: "itempane-tab-summary",
+    icon: "✦",
+    isAvailable: () => isSidebarModuleEnabled("note"),
+  },
+  {
     id: "chat",
     labelKey: "itempane-tab-chat",
     icon: "◌",
@@ -287,22 +293,16 @@ const SIDEBAR_TAB_DEFINITIONS: SidebarTabDefinition[] = [
       isSidebarModuleEnabled("quickChat"),
   },
   {
-    id: "mindmap",
-    labelKey: "itempane-tab-mindmap",
-    icon: "🧠",
-    isAvailable: () => isSidebarModuleEnabled("mindmap"),
-  },
-  {
     id: "deepRead",
     labelKey: "itempane-tab-deep-read",
     icon: "◇",
     isAvailable: () => isSidebarModuleEnabled("deepRead"),
   },
   {
-    id: "summary",
-    labelKey: "itempane-tab-summary",
-    icon: "✦",
-    isAvailable: () => isSidebarModuleEnabled("note"),
+    id: "mindmap",
+    labelKey: "itempane-tab-mindmap",
+    icon: "🧠",
+    isAvailable: () => isSidebarModuleEnabled("mindmap"),
   },
   {
     id: "quickRead",
@@ -906,6 +906,36 @@ export async function refreshCurrentItemPaneSection(options?: {
   renderItemPaneSection(body, item, handleOpenAIChat, options);
 }
 
+/** Open one sidebar tab for the selected paper. Summary and Chat stay here. */
+export async function focusSidebarTab(
+  tabId: SidebarTabId,
+  itemId?: number,
+): Promise<void> {
+  setPref("sidebarActiveTab", tabId);
+  try {
+    const pane = Zotero.getActiveZoteroPane?.();
+    if (pane && typeof itemId === "number") {
+      const selected = pane.getSelectedItems?.() || [];
+      const already = selected.some(
+        (selectedItem: Zotero.Item) => selectedItem.id === itemId,
+      );
+      if (!already && typeof pane.selectItem === "function") {
+        await pane.selectItem(itemId);
+      }
+    }
+    const doc =
+      pane?.document ||
+      (Zotero.getMainWindow?.()?.document as Document | undefined);
+    const sidenav = doc?.querySelector(
+      '[data-pane="ai-butler-chat-section"]',
+    ) as HTMLElement | null;
+    sidenav?.click();
+  } catch (error) {
+    ztoolkit.log("[AI-Butler] 聚焦侧边栏标签失败:", error);
+  }
+  await refreshCurrentItemPaneSection({ force: true });
+}
+
 /**
  * 渲染条目面板侧边栏内容
  */
@@ -914,7 +944,7 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 }
 
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
-const SIDEBAR_LAYOUT_GENERATION = "4";
+const SIDEBAR_LAYOUT_GENERATION = "5";
 
 function sidebarChromeIsCurrent(body: HTMLElement): boolean {
   if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
@@ -1658,6 +1688,53 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
     .ai-butler-sidebar-tab-panel[data-tab-id="summary"],
     .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] {
       padding: 0;
+      background: #000;
+      color: #fff;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .ai-butler-note-section,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .ai-butler-note-section,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .ai-butler-note-header,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .ai-butler-note-header,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .ai-butler-note-content-wrapper,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .ai-butler-note-content-wrapper,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .markdown-body,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .markdown-body,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] pre,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] pre,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] code,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] code,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] table,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] table,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] th,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] th,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] td,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] td,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] blockquote,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] blockquote {
+      background: #000 !important;
+      background-color: #000 !important;
+      color: #fff !important;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex,
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex *,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex * {
+      max-width: none !important;
+      overflow-wrap: normal !important;
+      word-break: normal !important;
+      white-space: nowrap !important;
+      color: #fff !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      box-sizing: content-box;
+    }
+
+    .ai-butler-sidebar-tab-panel[data-tab-id="summary"] .katex .vlist-s,
+    .ai-butler-sidebar-tab-panel[data-tab-id="deepRead"] .katex .vlist-s {
+      min-width: 2px;
+      width: 2px;
     }
 
     .ai-butler-sidebar-chat-entry {
@@ -1746,9 +1823,9 @@ function applySidebarTabOverflow(
   moreWrap.style.display = "block";
   const hidePriority: SidebarTabId[] = [
     "quickRead",
-    "summary",
-    "deepRead",
     "mindmap",
+    "deepRead",
+    "summary",
     "chat",
   ];
   const orderedTabs = hidePriority
@@ -1788,19 +1865,14 @@ function renderSidebarTabPanel(
   panel: HTMLElement,
   doc: Document,
   item: Zotero.Item,
-  handleOpenAIChat: (itemId: number) => Promise<void>,
+  _handleOpenAIChat: (itemId: number) => Promise<void>,
 ): void {
   switch (tabId) {
     case "summary":
       renderNoteSection(panel, doc, item, "summary", { mode: "page" });
       break;
     case "chat":
-      renderChatArea(panel, doc, item, true, {
-        mode: "page",
-        onOpenWindow: () => {
-          void handleOpenAIChat(item.id);
-        },
-      });
+      renderChatArea(panel, doc, item, true, { mode: "page" });
       break;
     case "deepRead":
       renderNoteSection(panel, doc, item, "deepRead", { mode: "page" });
@@ -2028,6 +2100,74 @@ type SidebarNoteRenderOptions = {
 /**
  * 渲染 AI 笔记区域
  */
+async function resolveSidebarParentItem(
+  item: Zotero.Item,
+): Promise<Zotero.Item> {
+  if (item.isAttachment?.()) {
+    const parentId = item.parentItemID;
+    if (parentId) {
+      const parent = await Zotero.Items.getAsync(parentId);
+      if (parent) return parent;
+    }
+  }
+  return item;
+}
+
+function sidebarGenerateLabel(noteKind: AiNoteKind): string {
+  return noteKind === "deepRead"
+    ? getString("itempane-generate-deep-read")
+    : getString("itempane-generate-summary");
+}
+
+function createSidebarGenerateButton(
+  doc: Document,
+  item: Zotero.Item,
+  noteKind: AiNoteKind,
+): HTMLButtonElement {
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.className = "ai-butler-sidebar-generate";
+  button.textContent = sidebarGenerateLabel(noteKind);
+  button.title = sidebarGenerateLabel(noteKind);
+  button.style.cssText = `
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    border-radius: 4px;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+  `;
+  button.addEventListener("click", async (event: Event) => {
+    event.stopPropagation();
+    const idleLabel = sidebarGenerateLabel(noteKind);
+    try {
+      button.disabled = true;
+      button.textContent = getString("itempane-adding-to-queue");
+      const target = await resolveSidebarParentItem(item);
+      const { TaskQueueManager } = await import("./taskQueue");
+      const queue = TaskQueueManager.getInstance();
+      if (noteKind === "deepRead") {
+        await queue.addDeepReadTask(target, true);
+      } else {
+        await queue.addTask(target, true);
+      }
+      button.textContent = getString("itempane-added-to-queue");
+    } catch {
+      button.textContent = getString("itempane-failed");
+      setTimeout(() => {
+        button.textContent = idleLabel;
+        button.disabled = false;
+      }, 2000);
+    }
+  });
+  return button;
+}
+
 function renderNoteSection(
   body: HTMLElement,
   doc: Document,
@@ -2466,6 +2606,10 @@ function renderNoteSection(
     });
     return btn;
   };
+
+  if (noteKind === "summary" || noteKind === "deepRead") {
+    mainControls.appendChild(createSidebarGenerateButton(doc, item, noteKind));
+  }
 
   const editBtn = createNoteActionBtn(
     "✏️",
@@ -6615,6 +6759,12 @@ async function loadNoteContent(
           <div>${getString("itempane-note-empty-kind", { args: { kind: getSidebarNoteKindLabel(noteKind) } })}</div>
         </div>
       `;
+      if (noteKind === "summary" || noteKind === "deepRead") {
+        const emptyGenerate = createSidebarGenerateButton(doc, item, noteKind);
+        emptyGenerate.style.display = "block";
+        emptyGenerate.style.margin = "0 auto 16px";
+        noteContent.appendChild(emptyGenerate);
+      }
       updateSidebarNoteEditControls(doc, "missing", "", undefined, noteKind);
       return;
     }
