@@ -256,9 +256,8 @@ type SidebarNoteEditState = {
 };
 
 let sidebarAutoRefreshBound = false;
-let sidebarRefreshTimer: number | null = null;
 let sidebarNoteEditState: SidebarNoteEditState | null = null;
-const pendingSidebarRefreshTargets = new Set<SidebarAutoRefreshTarget>();
+const sidebarContentLoadSerial = new Map<string, number>();
 const quickChatToggleListeners = new WeakMap<HTMLElement, EventListener>();
 const sidebarNoteEditEventCleanups = new WeakMap<HTMLElement, () => void>();
 const sidebarWorkspaceResizeObservers = new WeakMap<
@@ -269,6 +268,10 @@ const sidebarWorkspaceMenuCleanups = new WeakMap<HTMLElement, () => void>();
 const SIDEBAR_SUMMARY_SELECTION_PREF = "sidebarSelectedSummaryBlockIds" as any;
 
 type SidebarTabId = "summary" | "chat" | "deepRead" | "mindmap" | "quickRead";
+
+/** Last tab the user opened. A rebuild during Generate must not fall back to Summary. */
+let sidebarActiveTabId: SidebarTabId | null = null;
+let showSidebarTab: ((tabId: SidebarTabId) => void) | null = null;
 
 type SidebarTabDefinition = {
   id: SidebarTabId;
@@ -687,25 +690,74 @@ function parseTaskTarget(taskId: string): {
   return { itemId, target };
 }
 
-function scheduleSidebarRefresh(target: SidebarAutoRefreshTarget): void {
-  pendingSidebarRefreshTargets.add(target);
-  if (sidebarRefreshTimer) {
-    clearTimeout(sidebarRefreshTimer);
-  }
-  // Debounce: allow Zotero to finish saving notes/attachments
-  sidebarRefreshTimer = setTimeout(() => {
-    void runSidebarRefresh().catch((e) => {
-      ztoolkit.log("[AI-Butler] Sidebar auto-refresh failed:", e);
-    });
-  }, 500) as any as number;
+function beginSidebarContentLoad(key: string): number {
+  const next = (sidebarContentLoadSerial.get(key) || 0) + 1;
+  sidebarContentLoadSerial.set(key, next);
+  return next;
 }
 
-async function runSidebarRefresh(): Promise<void> {
+function sidebarContentLoadIsCurrent(key: string, serial: number): boolean {
+  return sidebarContentLoadSerial.get(key) === serial;
+}
+
+function sidebarPaneRoot(): ParentNode | null {
+  const body = sidebarRenderContext?.body;
+  if (body && body.isConnected !== false) return body;
+  return sidebarContext?.doc ?? null;
+}
+
+function sidebarQueryById(id: string): HTMLElement | null {
+  const root = sidebarPaneRoot();
+  if (!root) return null;
+  return root.querySelector(`#${id}`) as HTMLElement | null;
+}
+
+function scheduleSidebarRefresh(target: SidebarAutoRefreshTarget): void {
+  const reload = (attempt: number): void => {
+    const startedItemId = sidebarContext?.itemId;
+    void runSidebarRefresh([target])
+      .then(async () => {
+        if (!sidebarContext || sidebarContext.itemId !== startedItemId) return;
+        if (attempt >= 2 || !isSidebarJobTarget(target)) return;
+        if (!(await sidebarFeatureStillStale(target))) return;
+        const delay = attempt === 0 ? 700 : 1600;
+        setTimeout(() => reload(attempt + 1), delay);
+      })
+      .catch((e) => {
+        ztoolkit.log("[AI-Butler] Sidebar auto-refresh failed:", e);
+      });
+  };
+  reload(0);
+}
+
+function sidebarFeatureStillStale(target: SidebarJobKind): boolean {
+  const element =
+    target === "mindmap"
+      ? sidebarQueryById("ai-butler-mindmap-container")
+      : sidebarQueryById(
+          getSidebarNoteElementId("ai-butler-note-content", target),
+        );
+  if (!element) return true;
+  const text = element.textContent || "";
+  if (text.includes(getString("itempane-status-refreshing"))) return true;
+  if (target === "mindmap") {
+    return text.includes(getString("itempane-no-mindmap"));
+  }
+  return text.includes(
+    getString("itempane-note-empty-kind", {
+      args: { kind: getSidebarNoteKindLabel(target) },
+    }),
+  );
+}
+
+async function runSidebarRefresh(
+  explicitTargets?: SidebarAutoRefreshTarget[],
+): Promise<void> {
   if (!sidebarContext) return;
 
-  const { doc, itemId } = sidebarContext;
-  const targets = Array.from(pendingSidebarRefreshTargets);
-  pendingSidebarRefreshTargets.clear();
+  const { itemId } = sidebarContext;
+  const targets = explicitTargets ? explicitTargets.slice() : [];
+  if (!targets.length) return;
 
   let item: Zotero.Item = sidebarContext.item;
   try {
@@ -719,71 +771,53 @@ async function runSidebarRefresh(): Promise<void> {
 
   if (!sidebarContext || sidebarContext.itemId !== itemId) return;
 
-  if (targets.includes("summary")) {
-    const noteContent = doc.getElementById(
-      getSidebarNoteElementId("ai-butler-note-content", "summary"),
-    ) as HTMLElement | null;
-    if (noteContent) {
-      if (isSidebarNoteEditing(itemId)) {
-        setSidebarNoteEditStatus(
-          doc,
-          getString("itempane-note-editing-skip-auto-refresh"),
-          undefined,
-          "summary",
-        );
-      } else {
-        noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
-        await loadNoteContent(doc, item, noteContent, "summary");
-      }
+  const reloadNote = async (kind: "summary" | "deepRead"): Promise<void> => {
+    const noteContent = sidebarQueryById(
+      getSidebarNoteElementId("ai-butler-note-content", kind),
+    );
+    const doc = noteContent?.ownerDocument;
+    if (!noteContent || !doc) return;
+    if (isSidebarNoteEditing(itemId)) {
+      setSidebarNoteEditStatus(
+        doc,
+        getString("itempane-note-editing-skip-auto-refresh"),
+        undefined,
+        kind,
+      );
+      return;
     }
-  }
+    noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    await loadNoteContent(doc, item, noteContent, kind);
+  };
 
-  if (targets.includes("deepRead")) {
-    const noteContent = doc.getElementById(
-      getSidebarNoteElementId("ai-butler-note-content", "deepRead"),
-    ) as HTMLElement | null;
-    if (noteContent) {
-      if (isSidebarNoteEditing(itemId)) {
-        setSidebarNoteEditStatus(
-          doc,
-          getString("itempane-note-editing-skip-auto-refresh"),
-          undefined,
-          "deepRead",
-        );
-      } else {
-        noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
-        await loadNoteContent(doc, item, noteContent, "deepRead");
-      }
-    }
-  }
+  if (targets.includes("summary")) await reloadNote("summary");
+  if (targets.includes("deepRead")) await reloadNote("deepRead");
 
   if (targets.includes("imageSummary")) {
-    const imageContainer = doc.getElementById(
-      "ai-butler-image-container",
-    ) as HTMLElement | null;
-    const imageBtnContainer = doc.getElementById(
-      "ai-butler-image-btn-container",
-    ) as HTMLElement | null;
-    if (imageContainer && imageBtnContainer) {
+    const imageContainer = sidebarQueryById("ai-butler-image-container");
+    const imageBtnContainer = sidebarQueryById("ai-butler-image-btn-container");
+    const doc = imageContainer?.ownerDocument;
+    if (imageContainer && imageBtnContainer && doc) {
       imageContainer.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
       await loadImageSummary(doc, item, imageContainer, imageBtnContainer);
     }
   }
 
   if (targets.includes("mindmap")) {
-    const mindmapContainer = doc.getElementById(
-      "ai-butler-mindmap-container",
-    ) as HTMLElement | null;
-    if (mindmapContainer) {
+    const mindmapContainer = sidebarQueryById("ai-butler-mindmap-container");
+    const doc = mindmapContainer?.ownerDocument;
+    if (mindmapContainer && doc) {
       mindmapContainer.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
-      await loadMindmapContent(doc, item, mindmapContainer);
+      await loadMindmapContent(doc, item, mindmapContainer, {
+        mode: mindmapContainer.closest(".ai-butler-sidebar-tab-panel")
+          ? "page"
+          : "card",
+      });
     }
   }
 
   if (targets.includes("table")) {
-    const tableContent = doc.getElementById(
-      "ai-butler-table-content",
-    ) as HTMLElement | null;
+    const tableContent = sidebarQueryById("ai-butler-table-content");
     if (tableContent) {
       tableContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
       await loadTableContent(item, tableContent);
@@ -816,6 +850,7 @@ async function ensureSidebarAutoRefresh(): Promise<void> {
       ) {
         if (success) {
           sidebarJobMessages.delete(taskId);
+          hideSidebarJobProgress(parsed.target);
           void refreshSidebarJobProgress();
         } else {
           paintSidebarJobProgress(
@@ -968,7 +1003,7 @@ function sidebarHasQuickChat(body: HTMLElement): boolean {
 }
 
 /** Bump when sidebar chrome must replace a pane Zotero kept across an XPI upgrade. */
-const SIDEBAR_LAYOUT_GENERATION = "6";
+const SIDEBAR_LAYOUT_GENERATION = "7";
 
 function sidebarChromeIsCurrent(body: HTMLElement): boolean {
   if (body.querySelector(".ai-butler-sidebar-chat-entry")) return false;
@@ -1186,16 +1221,17 @@ function renderItemPaneSection(
   const content = doc.createElement("div");
   content.className = "ai-butler-sidebar-content";
 
-  const preferredActiveTab = String(
-    getPref("sidebarActiveTab") || "chat",
+  const storedTab = String(
+    sidebarActiveTabId || getPref("sidebarActiveTab") || "chat",
   ) as SidebarTabId;
-  let activeTab = tabs.some((tab) => tab.id === preferredActiveTab)
-    ? preferredActiveTab
+  let activeTab = tabs.some((tab) => tab.id === storedTab)
+    ? storedTab
     : tabs[0].id;
 
   const activateTab = (tabId: SidebarTabId): void => {
     if (!panels.has(tabId)) return;
     activeTab = tabId;
+    sidebarActiveTabId = activeTab;
     setPref("sidebarActiveTab", activeTab);
 
     for (const tab of tabs) {
@@ -1212,12 +1248,14 @@ function renderItemPaneSection(
         menuItem.classList.toggle("is-active", isActive);
       }
       if (panel) {
+        panel.classList.toggle("is-active", isActive);
         panel.style.display = isActive ? "flex" : "none";
         panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       }
     }
     applySidebarTabOverflow(nav, tabs, tabButtons, overflowMenuItems, moreWrap);
   };
+  showSidebarTab = activateTab;
 
   for (const tab of tabs) {
     const button = doc.createElement("button");
@@ -1280,6 +1318,7 @@ function renderItemPaneSection(
   for (const tab of tabs) {
     const panel = doc.createElement("div");
     panel.className = "ai-butler-sidebar-tab-panel";
+    if (tab.id === activeTab) panel.classList.add("is-active");
     panel.dataset.tabId = tab.id;
     panel.setAttribute("role", "tabpanel");
     panel.style.display = tab.id === activeTab ? "flex" : "none";
@@ -1291,7 +1330,6 @@ function renderItemPaneSection(
 
   nav.appendChild(refreshBtn);
   shell.appendChild(nav);
-  shell.appendChild(createSidebarJobProgress(doc));
   shell.appendChild(content);
   void refreshSidebarJobProgress();
   body.appendChild(shell);
@@ -1659,9 +1697,19 @@ function ensureSidebarWorkspaceStyles(doc: Document): void {
       color: #fff;
     }
 
+    .ai-butler-sidebar-tab-panel {
+      display: none;
+    }
+
+    .ai-butler-sidebar-tab-panel.is-active {
+      display: flex;
+    }
+
     .ai-butler-sidebar-job {
       display: none;
       flex: 0 0 auto;
+      box-sizing: border-box;
+      width: 100%;
       padding: 8px 10px 6px;
       background: #000;
       color: #fff;
@@ -2208,13 +2256,33 @@ function sidebarContextItemIds(): number[] {
   return ids;
 }
 
+function sidebarJobHost(kind: SidebarJobKind): HTMLElement | null {
+  return sidebarQueryById(`ai-butler-sidebar-job-${kind}`);
+}
+
+function hideSidebarJobProgress(kind: SidebarJobKind): void {
+  sidebarJobHost(kind)?.classList.remove("is-active");
+}
+
+function pinSidebarJobTab(kind: SidebarJobKind): void {
+  sidebarActiveTabId = kind;
+  setPref("sidebarActiveTab", kind);
+  showSidebarTab?.(kind);
+}
+
 function paintSidebarJobProgress(
   kind: SidebarJobKind | null,
   progress: number,
   message: string,
   failed = false,
 ): void {
-  const host = sidebarContext?.doc.getElementById("ai-butler-sidebar-job");
+  if (!kind) {
+    hideSidebarJobProgress("summary");
+    hideSidebarJobProgress("deepRead");
+    hideSidebarJobProgress("mindmap");
+    return;
+  }
+  const host = sidebarJobHost(kind);
   if (!host) return;
   const label = host.querySelector(
     ".ai-butler-sidebar-job-label",
@@ -2222,10 +2290,6 @@ function paintSidebarJobProgress(
   const fill = host.querySelector(
     ".ai-butler-sidebar-job-fill",
   ) as HTMLElement | null;
-  if (!kind) {
-    host.classList.remove("is-active");
-    return;
-  }
   host.classList.add("is-active");
   const clamped = Math.max(0, Math.min(100, Math.round(progress)));
   if (label) {
@@ -2243,10 +2307,14 @@ function paintSidebarJobProgress(
   host.setAttribute("aria-valuenow", String(clamped));
 }
 
-function createSidebarJobProgress(doc: Document): HTMLElement {
+function createSidebarJobProgress(
+  doc: Document,
+  kind: SidebarJobKind,
+): HTMLElement {
   const host = doc.createElement("div");
-  host.id = "ai-butler-sidebar-job";
+  host.id = `ai-butler-sidebar-job-${kind}`;
   host.className = "ai-butler-sidebar-job";
+  host.dataset.jobKind = kind;
   host.setAttribute("role", "progressbar");
   host.setAttribute("aria-valuemin", "0");
   host.setAttribute("aria-valuemax", "100");
@@ -2264,9 +2332,10 @@ function createSidebarJobProgress(doc: Document): HTMLElement {
 }
 
 async function refreshSidebarJobProgress(): Promise<void> {
+  const kinds: SidebarJobKind[] = ["summary", "deepRead", "mindmap"];
   const ids = sidebarContextItemIds();
   if (!ids.length) {
-    paintSidebarJobProgress(null, 0, "");
+    for (const kind of kinds) hideSidebarJobProgress(kind);
     return;
   }
   const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
@@ -2282,19 +2351,23 @@ async function refreshSidebarJobProgress(): Promise<void> {
           task.status === TaskStatus.PROCESSING)
       );
     });
-  const current =
-    active.find((task) => task.status === TaskStatus.PROCESSING) || active[0];
-  if (!current) {
-    paintSidebarJobProgress(null, 0, "");
-    return;
+  for (const kind of kinds) {
+    const matches = active.filter(
+      (task) => sidebarJobKindFromTask(task) === kind,
+    );
+    const current =
+      matches.find((task) => task.status === TaskStatus.PROCESSING) ||
+      matches[0];
+    if (!current) {
+      hideSidebarJobProgress(kind);
+      continue;
+    }
+    paintSidebarJobProgress(
+      kind,
+      current.progress || 0,
+      sidebarJobMessages.get(current.id) || current.workflowStage || "",
+    );
   }
-  const kind = sidebarJobKindFromTask(current);
-  if (!kind) return;
-  paintSidebarJobProgress(
-    kind,
-    current.progress || 0,
-    sidebarJobMessages.get(current.id) || current.workflowStage || "",
-  );
 }
 
 async function enqueueSidebarJob(
@@ -2303,6 +2376,7 @@ async function enqueueSidebarJob(
   item: Zotero.Item,
   kind: SidebarJobKind,
 ): Promise<void> {
+  pinSidebarJobTab(kind);
   const target = await resolveSidebarParentItem(item);
   const { TaskArtifacts } = await import("./taskArtifacts");
   const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
@@ -2349,6 +2423,7 @@ async function enqueueSidebarJob(
   } else {
     await queue.addTask(target, true, options);
   }
+  pinSidebarJobTab(kind);
   paintSidebarJobProgress(kind, 0, getString("itempane-sidebar-job-queued"));
   button.textContent = getString("itempane-added-to-queue");
 }
@@ -2383,6 +2458,7 @@ function createSidebarGenerateButton(
     line-height: 1.2;
   `;
   button.addEventListener("click", async (event: Event) => {
+    event.preventDefault();
     event.stopPropagation();
     const idleLabel = sidebarGenerateLabel(noteKind);
     try {
@@ -3093,6 +3169,9 @@ function renderNoteSection(
     });
   }
 
+  if (isPageMode && (noteKind === "summary" || noteKind === "deepRead")) {
+    noteSection.appendChild(createSidebarJobProgress(doc, noteKind));
+  }
   noteSection.appendChild(noteHeader);
   noteSection.appendChild(metadataMenu);
   noteSection.appendChild(noteContentWrapper);
@@ -3643,6 +3722,7 @@ function renderMindmapSection(
     line-height: 1.2;
   `;
   mindmapGenerateBtn.addEventListener("click", async (event: Event) => {
+    event.preventDefault();
     event.stopPropagation();
     const idleLabel = getString("itempane-generate-mindmap");
     try {
@@ -3717,6 +3797,9 @@ function renderMindmapSection(
     }
   });
 
+  if (isPageMode) {
+    mindmapSection.appendChild(createSidebarJobProgress(doc, "mindmap"));
+  }
   mindmapSection.appendChild(mindmapHeader);
   mindmapSection.appendChild(mindmapContainer);
   body.appendChild(mindmapSection);
@@ -3735,6 +3818,11 @@ async function loadMindmapContent(
   options: { mode?: "card" | "page" } = {},
 ): Promise<void> {
   const isPageMode = options.mode === "page";
+  const loadKey = `mindmap:${item.id}`;
+  const loadSerial = beginSidebarContentLoad(loadKey);
+  const mindmapWriteIsCurrent = (): boolean =>
+    sidebarContentLoadIsCurrent(loadKey, loadSerial) &&
+    container.isConnected !== false;
   try {
     // Avoid accumulating message listeners across re-renders/refreshes
     const mindmapWin: any = doc.defaultView;
@@ -3828,6 +3916,7 @@ async function loadMindmapContent(
         }
       });
 
+      if (!mindmapWriteIsCurrent()) return;
       container.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
           <div style="font-size: 24px; margin-bottom: 8px;">🧠</div>
@@ -3871,6 +3960,7 @@ async function loadMindmapContent(
     }
 
     if (!match) {
+      if (!mindmapWriteIsCurrent()) return;
       container.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
           <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
@@ -3887,6 +3977,7 @@ async function loadMindmapContent(
     );
 
     if (!markdownContent.trim()) {
+      if (!mindmapWriteIsCurrent()) return;
       container.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
           <div style="font-size: 24px; margin-bottom: 8px;">📄</div>
@@ -3896,6 +3987,7 @@ async function loadMindmapContent(
       return;
     }
 
+    if (!mindmapWriteIsCurrent()) return;
     // 清空容器
     container.innerHTML = "";
 
@@ -4143,6 +4235,7 @@ async function loadMindmapContent(
     } catch (renderError: any) {
       ztoolkit.log("[AI-Butler] 思维导图渲染失败:", renderError);
 
+      if (!mindmapWriteIsCurrent()) return;
       // 回退显示格式化的 Markdown
       container.innerHTML = `
         <div style="text-align: left; padding: 15px; font-size: 12px; background: #fff; border-radius: 8px; overflow: auto; max-height: 400px; white-space: pre-wrap; font-family: monospace; line-height: 1.6;">${markdownContent.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
@@ -4150,6 +4243,7 @@ async function loadMindmapContent(
     }
   } catch (err: any) {
     ztoolkit.log("[AI-Butler] 加载思维导图失败:", err);
+    if (!mindmapWriteIsCurrent()) return;
     container.innerHTML = `<div style="color: #d32f2f; padding: 10px;">${getString("itempane-mindmap-load-failed", { args: { message: escapeHtmlForChat(err.message) } })}</div>`;
   }
 }
@@ -6999,7 +7093,13 @@ async function loadNoteContent(
   noteContent: HTMLElement,
   noteKind: AiNoteKind = "summary",
 ): Promise<void> {
+  const loadKey = `note:${item.id}:${noteKind}`;
+  const loadSerial = beginSidebarContentLoad(loadKey);
+  const noteWriteIsCurrent = (): boolean =>
+    sidebarContentLoadIsCurrent(loadKey, loadSerial) &&
+    noteContent.isConnected !== false;
   try {
+    if (!noteWriteIsCurrent()) return;
     if (isSidebarNoteEditing(item.id)) {
       setSidebarNoteEditStatus(
         doc,
@@ -7015,6 +7115,7 @@ async function loadNoteContent(
     const resolvedNote = await resolveSidebarSummaryNote(item, noteKind);
 
     if (!resolvedNote) {
+      if (!noteWriteIsCurrent()) return;
       hideSidebarMetadataPicker(doc, noteKind);
       noteContent.innerHTML = `
         <div style="text-align: center; color: #9e9e9e; padding: 16px;">
@@ -7442,6 +7543,8 @@ async function loadNoteContent(
     );
     const parserError = docTest.querySelector("parsererror");
 
+    if (!noteWriteIsCurrent()) return;
+
     if (parserError) {
       // Extract error details
       const errorText =
@@ -7606,10 +7709,12 @@ async function loadNoteContent(
       noteContent.appendChild(errorContainer);
     } else {
       // LaTeX formulas already rendered before XML validation
+      if (!noteWriteIsCurrent()) return;
       noteContent.innerHTML = sanitizedContent;
     }
   } catch (err: any) {
     ztoolkit.log("[AI-Butler] 加载笔记失败:", err);
+    if (!noteWriteIsCurrent()) return;
     noteContent.innerHTML = `<div style="color: #d32f2f; padding: 10px;">${getString("itempane-note-load-failed", { args: { message: escapeHtmlForChat(err.message) } })}</div>`;
   }
 }
