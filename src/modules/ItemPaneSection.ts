@@ -707,8 +707,17 @@ function sidebarQueryById(id: string): HTMLElement | null {
   return root.querySelector(`#${id}`) as HTMLElement | null;
 }
 
-function scheduleSidebarRefresh(target: SidebarAutoRefreshTarget): void {
+function scheduleSidebarRefresh(
+  target: SidebarAutoRefreshTarget,
+  itemId?: number,
+): void {
   const reload = (attempt: number): void => {
+    if (
+      typeof itemId === "number" &&
+      !sidebarContextItemIds().includes(itemId)
+    ) {
+      return;
+    }
     const startedItemId = sidebarContext?.itemId;
     void runSidebarRefresh([target])
       .then(async () => {
@@ -723,6 +732,12 @@ function scheduleSidebarRefresh(target: SidebarAutoRefreshTarget): void {
       });
   };
   reload(0);
+}
+
+/** Deep Read saved another section. Reload that tab without leaving it. */
+export function notifySidebarDeepReadSectionSaved(itemId: number): void {
+  if (!sidebarContextItemIds().includes(itemId)) return;
+  scheduleSidebarRefresh("deepRead", itemId);
 }
 
 function sidebarFeatureStillStale(target: SidebarJobKind): boolean {
@@ -781,8 +796,17 @@ async function runSidebarRefresh(
       );
       return;
     }
-    noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
-    await loadNoteContent(doc, item, noteContent, kind);
+    const visibleText = noteContent.textContent || "";
+    const keepVisible =
+      visibleText.trim().length > 0 &&
+      !visibleText.includes(getString("itempane-status-refreshing"));
+    if (!keepVisible) {
+      noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    }
+    const scroller = noteContent.parentElement;
+    const scrollTop = scroller?.scrollTop || 0;
+    await loadNoteContent(doc, item, noteContent, kind, { keepVisible });
+    if (scroller?.isConnected) scroller.scrollTop = scrollTop;
   };
 
   if (targets.includes("summary")) await reloadNote("summary");
@@ -825,40 +849,54 @@ async function ensureSidebarAutoRefresh(): Promise<void> {
   sidebarAutoRefreshBound = true;
 
   try {
-    const { TaskQueueManager } = await import("./taskQueue");
+    const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
     const manager = TaskQueueManager.getInstance();
 
     manager.onProgress((taskId, progress, message) => {
-      sidebarJobMessages.set(taskId, message);
       const parsed = parseTaskTarget(taskId);
       if (!parsed || !isSidebarJobTarget(parsed.target)) return;
       if (!sidebarContextItemIds().includes(parsed.itemId)) return;
+      const task = manager.getTask(taskId);
+      if (
+        !task ||
+        task.status === TaskStatus.COMPLETED ||
+        task.status === TaskStatus.FAILED
+      ) {
+        closeSidebarJob(parsed.target, taskId);
+        return;
+      }
+      sidebarJobClosed.delete(taskId);
+      sidebarJobMessages.set(taskId, message);
       paintSidebarJobProgress(parsed.target, progress, message);
     });
 
     manager.onComplete((taskId, success) => {
       const parsed = parseTaskTarget(taskId);
       if (!parsed) return;
-      if (
-        sidebarContextItemIds().includes(parsed.itemId) &&
-        isSidebarJobTarget(parsed.target)
-      ) {
-        if (success) {
-          sidebarJobMessages.delete(taskId);
-          hideSidebarJobProgress(parsed.target);
-          void refreshSidebarJobProgress();
-        } else {
+      if (!sidebarContextItemIds().includes(parsed.itemId)) return;
+      const task = manager.getTask(taskId);
+      const stillQueued =
+        task?.status === TaskStatus.PENDING ||
+        task?.status === TaskStatus.PRIORITY ||
+        task?.status === TaskStatus.PROCESSING;
+      if (stillQueued) {
+        sidebarJobClosed.delete(taskId);
+        if (isSidebarJobTarget(parsed.target)) {
           paintSidebarJobProgress(
             parsed.target,
-            0,
-            getString("itempane-failed"),
-            true,
+            task?.progress || 0,
+            sidebarJobMessages.get(taskId) ||
+              task?.workflowStage ||
+              getString("itempane-sidebar-job-queued"),
           );
         }
+        return;
       }
-      if (!success) return;
-      if (!sidebarContextItemIds().includes(parsed.itemId)) return;
-      scheduleSidebarRefresh(parsed.target);
+      if (isSidebarJobTarget(parsed.target)) {
+        closeSidebarJob(parsed.target, taskId);
+        return;
+      }
+      if (success) scheduleSidebarRefresh(parsed.target);
     });
   } catch (error) {
     ztoolkit.log("[AI-Butler] Sidebar auto-refresh bind failed:", error);
@@ -2057,6 +2095,13 @@ function renderSidebarTabPanel(
 ): void {
   if (renderedSidebarPanels.has(panel)) return;
   renderedSidebarPanels.add(panel);
+  if (tabId === "summary" || tabId === "deepRead" || tabId === "mindmap") {
+    panel.appendChild(createSidebarJobProgress(doc, tabId));
+    const snap = sidebarJobSnapshot.get(tabId);
+    if (snap) {
+      paintSidebarJobProgress(tabId, snap.progress, snap.message, snap.failed);
+    }
+  }
   switch (tabId) {
     case "summary":
       renderNoteSection(panel, doc, item, "summary", { mode: "page" });
@@ -2315,6 +2360,28 @@ async function resolveSidebarParentItem(
 type SidebarJobKind = "summary" | "deepRead" | "mindmap";
 
 const sidebarJobMessages = new Map<string, string>();
+const sidebarJobClosed = new Set<string>();
+const sidebarJobSnapshot = new Map<
+  SidebarJobKind,
+  { progress: number; message: string; failed: boolean }
+>();
+
+function forgetClosedSidebarJob(kind: SidebarJobKind): void {
+  for (const taskId of Array.from(sidebarJobClosed)) {
+    if (parseTaskTarget(taskId)?.target === kind) {
+      sidebarJobClosed.delete(taskId);
+    }
+  }
+}
+
+function closeSidebarJob(kind: SidebarJobKind, taskId: string): void {
+  if (sidebarJobClosed.has(taskId)) return;
+  sidebarJobClosed.add(taskId);
+  sidebarJobMessages.delete(taskId);
+  sidebarJobSnapshot.delete(kind);
+  hideSidebarJobProgress(kind);
+  scheduleSidebarRefresh(kind);
+}
 
 function isSidebarJobTarget(
   target: SidebarAutoRefreshTarget,
@@ -2353,7 +2420,10 @@ function sidebarJobHost(kind: SidebarJobKind): HTMLElement | null {
 }
 
 function hideSidebarJobProgress(kind: SidebarJobKind): void {
-  sidebarJobHost(kind)?.classList.remove("is-active");
+  sidebarJobSnapshot.delete(kind);
+  const host = sidebarJobHost(kind);
+  host?.classList.remove("is-active");
+  if (host) host.style.display = "none";
 }
 
 function pinSidebarJobTab(kind: SidebarJobKind): void {
@@ -2374,6 +2444,7 @@ function paintSidebarJobProgress(
     hideSidebarJobProgress("mindmap");
     return;
   }
+  sidebarJobSnapshot.set(kind, { progress, message, failed });
   const host = sidebarJobHost(kind);
   if (!host) return;
   const label = host.querySelector(
@@ -2383,6 +2454,7 @@ function paintSidebarJobProgress(
     ".ai-butler-sidebar-job-fill",
   ) as HTMLElement | null;
   host.classList.add("is-active");
+  host.style.display = "block";
   const clamped = Math.max(0, Math.min(100, Math.round(progress)));
   if (label) {
     label.textContent = getString("itempane-sidebar-job-progress", {
@@ -2407,6 +2479,8 @@ function createSidebarJobProgress(
   host.id = `ai-butler-sidebar-job-${kind}`;
   host.className = "ai-butler-sidebar-job";
   host.dataset.jobKind = kind;
+  host.style.flex = "0 0 auto";
+  host.style.display = "none";
   host.setAttribute("role", "progressbar");
   host.setAttribute("aria-valuemin", "0");
   host.setAttribute("aria-valuemax", "100");
@@ -2469,6 +2543,7 @@ async function enqueueSidebarJob(
   kind: SidebarJobKind,
 ): Promise<void> {
   pinSidebarJobTab(kind);
+  forgetClosedSidebarJob(kind);
   const target = await resolveSidebarParentItem(item);
   const { TaskArtifacts } = await import("./taskArtifacts");
   const { TaskQueueManager, TaskStatus } = await import("./taskQueue");
@@ -2587,7 +2662,8 @@ function renderNoteSection(
     ? `
     display: flex;
     flex-direction: column;
-    height: 100%;
+    flex: 1 1 auto;
+    height: auto;
     min-height: 0;
     overflow: hidden;
     width: 100%;
@@ -3261,9 +3337,6 @@ function renderNoteSection(
     });
   }
 
-  if (isPageMode && (noteKind === "summary" || noteKind === "deepRead")) {
-    noteSection.appendChild(createSidebarJobProgress(doc, noteKind));
-  }
   noteSection.appendChild(noteHeader);
   noteSection.appendChild(metadataMenu);
   noteSection.appendChild(noteContentWrapper);
@@ -3742,7 +3815,7 @@ function renderMindmapSection(
     ? `
     flex: 1 1 auto;
     min-height: 0;
-    height: 100%;
+    height: auto;
     margin: 0;
     display: flex;
     flex-direction: column;
@@ -3889,9 +3962,6 @@ function renderMindmapSection(
     }
   });
 
-  if (isPageMode) {
-    mindmapSection.appendChild(createSidebarJobProgress(doc, "mindmap"));
-  }
   mindmapSection.appendChild(mindmapHeader);
   mindmapSection.appendChild(mindmapContainer);
   body.appendChild(mindmapSection);
@@ -7223,6 +7293,7 @@ async function loadNoteContent(
   item: Zotero.Item,
   noteContent: HTMLElement,
   noteKind: AiNoteKind = "summary",
+  options?: { keepVisible?: boolean },
 ): Promise<void> {
   const loadKey = `note:${item.id}:${noteKind}`;
   const loadSerial = beginSidebarContentLoad(loadKey);
@@ -7250,7 +7321,9 @@ async function loadNoteContent(
     }
 
     resetSidebarNoteContentEditMode(noteContent);
-    noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    if (!options?.keepVisible) {
+      noteContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">${getString("itempane-status-refreshing")}</div>`;
+    }
     let aiNoteContent = "";
     const resolvedNote = await resolveSidebarSummaryNote(item, noteKind);
 

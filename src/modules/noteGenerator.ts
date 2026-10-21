@@ -1400,6 +1400,18 @@ export class NoteGenerator {
       }
     }
 
+    const publishDeepReadSidebar = (): void => {
+      const itemId = params.item.id;
+      void import("./ItemPaneSection")
+        .then(({ notifySidebarDeepReadSectionSaved }) => {
+          notifySidebarDeepReadSectionSaved(itemId);
+        })
+        .catch((error) => {
+          ztoolkit.log("[AI-Butler] Deep read sidebar refresh failed:", error);
+        });
+    };
+    publishDeepReadSidebar();
+
     let writeQueue = Promise.resolve();
     const updateSlot = async (
       slot: DeepReadSlot,
@@ -1428,6 +1440,7 @@ export class NoteGenerator {
         }
       });
       await writeQueue;
+      publishDeepReadSidebar();
     };
 
     const markSlotRunning = async (slot: DeepReadSlot) => {

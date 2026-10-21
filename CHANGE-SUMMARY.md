@@ -1,23 +1,21 @@
-# 5.0.0-beta.2-jalen.9
+# 5.0.0-beta.2-jalen.10
 
-Fork-only build. Opening the AI Butler sidebar paints immediately, and a paper that already has Summary or Deep Read notes shows those notes without generating again.
+Fork-only build. The sidebar progress bar clears when a task finishes, Deep Read shows each finished section as it is saved, and Summary has the same per-tab progress bar as Deep Read and Mind Map.
 
 ## What changed
 
-- The sidebar shell is attached before any tab does heavy work. Summary, Deep Read, and Mind Map are no longer built, scanned, and typeset in the same turn as the robot-icon click.
-- Existing Summary and Deep Read notes load after the pane is on screen. A later open of the same paper fills a blank note tab instead of keeping the empty pane. The active tab loads first; the other note tab follows on the next turn.
-- Restored Chat messages are typeset a pair at a time, and the task-queue progress read waits until after the pane has painted.
+- A finished, failed, or cancelled Summary / Deep Read / Mind Map job no longer leaves the sidebar bar on “generating”. Later progress events from that same task cannot turn the bar back on. The note reloads when the job ends.
+- Each time Deep Read saves a finished section, the sidebar Deep Read tab reloads that note in place. The view stays on the current tab, and the progress bar stays with that tab until the job ends.
+- The Summary progress bar is the same per-tab bar as Deep Read and Mind Map, drawn above the note so it stays visible while that summary is generating.
 
 ## Kept
 
-- Each sidebar tab still has its own progress bar, and a finished job still reloads that tab.
-- Generate still asks before replacing a finished result, and confirm still regenerates Deep Read and Summary.
-- Summary and Deep Read still use the Chat KaTeX path. Subscript layout is unchanged.
-- Chat stays page-mode on black (`#000`) / white (`#fff`). KaTeX is still the 0.18 stylesheet.
-- The main window still has no Summary or Chat tabs.
+- Generate still asks before replacing a finished result, and confirm still regenerates.
+- Summary and Deep Read still use the Chat KaTeX path. Black (`#000`) / white (`#fff`) is unchanged.
+- Opening the sidebar still paints the shell before the heavy note work.
 
 ## Verify in Zotero
 
-1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.9.xpi` and restart Zotero.
-2. Select a paper that already has Summary and Deep Read notes, then click the AI Butler robot icon. The pane should appear quickly, and those notes should show in their tabs without Generate or a manual refresh.
-3. Switch to another paper with saved notes. Summary and Deep Read should follow the selection.
+1. Install `zotero-ai-butler-5.0.0-beta.2-jalen.10.xpi` and restart Zotero.
+2. Regenerate Deep Read. Finished sections should show in the Deep Read tab while later sections are still running. When Task Queue shows the job finished, the sidebar bar should clear and the note should match the saved deep read.
+3. Generate Summary. The Summary tab should show its own progress bar until that job finishes.
